@@ -9,6 +9,7 @@ from GUI.Session.session import SessionDataChanged, SessionManager, StructureMan
 from GUI.Settings import settings
 from GUI.States import states
 from GUI.Utils import guitypedefs, guiutils, update_check, utilwidgets
+from GUI.Utils.plustab import PlusTabManager
 from GUI.Widgets.About.About import AboutWidget
 from GUI.Widgets.Console.Console import ConsoleWidget
 from GUI.Widgets.EditType.EditType import EditTypeDialog
@@ -2361,21 +2362,17 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def setup_scan_tabs(self) -> None:
         self.scan_tabs: list[ScanTabWidget] = []
+        self.plus_tab_manager = PlusTabManager(self.tabWidget_Scans, tooltip=tr.ADD_SCAN_TAB)
+        self.plus_tab_manager.add_requested.connect(self.add_scan_tab)
+        self.plus_tab_manager.close_requested.connect(self.close_scan_tab)
+        self.plus_tab_manager.rename_requested.connect(self.rename_scan_tab)
         self.add_scan_tab()
-        plus_button = QPushButton("+")
-        plus_button.setFixedSize(24, 24)
-        plus_button.setToolTip(tr.ADD_SCAN_TAB)
-        plus_button.clicked.connect(self.add_scan_tab)
-        self.tab_add_button = plus_button
-        self.tabWidget_Scans.setCornerWidget(plus_button, Qt.Corner.TopRightCorner)
-        self.tabWidget_Scans.tabCloseRequested.connect(self.close_scan_tab)
-        self.tabWidget_Scans.tabBarDoubleClicked.connect(self.rename_scan_tab)
         self.setup_tab_shortcuts()
 
     def setup_tab_shortcuts(self) -> None:
         shortcut_new_tab = QShortcut(QKeySequence("Ctrl+T"), self)
         shortcut_new_tab.activated.connect(self.add_scan_tab)
-        guiutils.append_shortcut_to_tooltip(self.tab_add_button, shortcut_new_tab)
+        self.plus_tab_manager.set_tooltip(tr.ADD_SCAN_TAB + " [" + shortcut_new_tab.key().toString() + "]")
 
         shortcut_close_tab = QShortcut(QKeySequence("Ctrl+W"), self)
         shortcut_close_tab.activated.connect(self.close_current_scan_tab)
@@ -2394,14 +2391,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.close_scan_tab(self.tabWidget_Scans.currentIndex())
 
     def switch_scan_tab(self, delta: int) -> None:
-        count = self.tabWidget_Scans.count()
+        count = self.plus_tab_manager.real_count()
         if count <= 1:
             return
         current = self.tabWidget_Scans.currentIndex()
         self.tabWidget_Scans.setCurrentIndex((current + delta) % count)
 
     def jump_to_scan_tab(self, index: int) -> None:
-        count = self.tabWidget_Scans.count()
+        count = self.plus_tab_manager.real_count()
         if index == 9:  # browser-like: Ctrl+9 jumps to the last tab
             self.tabWidget_Scans.setCurrentIndex(count - 1)
         elif 1 <= index <= count:
@@ -2410,12 +2407,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def add_scan_tab(self) -> ScanTabWidget:
         tab = ScanTabWidget(self)
         self.scan_tabs.append(tab)
-        self.tabWidget_Scans.addTab(tab, tr.SCAN_TAB_TITLE.format(self.tabWidget_Scans.count() + 1))
+        self.plus_tab_manager.insert_before_plus(tab, tr.SCAN_TAB_TITLE.format(self.plus_tab_manager.real_count() + 1))
         self.tabWidget_Scans.setCurrentWidget(tab)
         return tab
 
     def close_scan_tab(self, index: int) -> None:
-        if self.tabWidget_Scans.count() <= 1:
+        if self.plus_tab_manager.is_plus(index) or self.plus_tab_manager.real_count() <= 1:
             return
         tab = self.tabWidget_Scans.widget(index)
         if tab.is_scanning:
@@ -2426,6 +2423,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         tab.deleteLater()
 
     def rename_scan_tab(self, index: int) -> None:
+        if self.plus_tab_manager.is_plus(index):
+            return
         title, ok = QInputDialog.getText(
             self, tr.RENAME_TAB_TITLE, tr.ENTER_TAB_NAME, text=self.tabWidget_Scans.tabText(index)
         )
@@ -2434,4 +2433,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     @property
     def current_scan_tab(self) -> ScanTabWidget:
-        return self.tabWidget_Scans.currentWidget()
+        current_widget = self.tabWidget_Scans.currentWidget()
+        if current_widget is self.plus_tab_manager.plus_widget:
+            return self.scan_tabs[0]
+        return current_widget
