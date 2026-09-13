@@ -752,6 +752,10 @@ class ScanTabWidget(QWidget):
                     lambda: self.mainform.disassemble_for_address(current_address),
                 ),
                 (
+                    QKeyCombination(Qt.KeyboardModifier.ControlModifier, Qt.Key.Key_E),
+                    self.change_valuesearchtable_value,
+                ),
+                (
                     QKeyCombination(Qt.KeyboardModifier.NoModifier, Qt.Key.Key_Delete),
                     self.delete_valuesearchtable_selection,
                 ),
@@ -784,6 +788,7 @@ class ScanTabWidget(QWidget):
             copy_selection = menu.addAction(f"{tr.COPY_ADDRESSES}[Ctrl+C]")
         else:
             copy_selection = menu.addAction(f"{tr.COPY_ADDRESS}[Ctrl+C]")
+        change_value = menu.addAction(f"{tr.CHANGE_VALUE}[Ctrl+E]")
         menu.addSeparator()
         browse_region = menu.addAction(f"{tr.BROWSE_MEMORY_REGION}[Ctrl+B]")
         disassemble = menu.addAction(f"{tr.DISASSEMBLE_ADDRESS}[Ctrl+D]")
@@ -794,6 +799,7 @@ class ScanTabWidget(QWidget):
         action = menu.exec(event.globalPos())
         actions = {
             copy_selection: self.copy_valuesearchtable_selection,
+            change_value: self.change_valuesearchtable_value,
             browse_region: lambda: self.mainform.browse_region_for_address(address),
             disassemble: lambda: self.mainform.disassemble_for_address(address),
             delete_selection: self.delete_valuesearchtable_selection,
@@ -837,6 +843,33 @@ class ScanTabWidget(QWidget):
             self.mainform.add_entry_to_addresstable(tr.NO_DESCRIPTION, address_item.text(), vt)
         self.mainform.update_address_table()
         self.mainform.mark_address_tree_changed()
+
+    def change_valuesearchtable_value(self) -> None:
+        selected_indexes = self.tableWidget_valuesearchtable.selectionModel().selectedRows()
+        if selected_indexes:
+            rows = sorted(index.row() for index in selected_indexes)
+        else:
+            current_item = self.tableWidget_valuesearchtable.currentItem()
+            if current_item is None:
+                return
+            rows = [current_item.row()]
+        first_value = self.tableWidget_valuesearchtable.item(rows[0], SEARCH_TABLE_VALUE_COL).text()
+        dialog = utilwidgets.InputDialog(self, [(tr.ENTER_VALUE, first_value)])
+        if not dialog.exec():
+            return
+        new_value = dialog.get_values()[0]
+        parsed_rows = []
+        for row in rows:
+            address_item = self.tableWidget_valuesearchtable.item(row, SEARCH_TABLE_ADDRESS_COL)
+            value_type = address_item.data(Qt.ItemDataRole.UserRole)
+            parsed_value = value_type.parse(new_value)
+            if parsed_value is None:
+                QMessageBox.information(self, tr.ERROR, tr.PARSE_ERROR)
+                return
+            parsed_rows.append((address_item.text(), value_type, parsed_value))
+        for address, value_type, parsed_value in parsed_rows:
+            debugcore.write_memory(address, value_type, parsed_value)
+        self.update_search_table()
 
     def reset_scan(self, inferior_exit: bool = False) -> None:
         if inferior_exit:

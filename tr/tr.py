@@ -155,6 +155,7 @@ class TranslationConstants(QObject):
     STATUS_STOPPED = QT_TR_NOOP("[stopped]")
     REQUIRE_PROCESS_STOP = QT_TR_NOOP("This requires the process to be stopped")
     ENTER_VALUE = QT_TR_NOOP("Enter the new value")
+    CHANGE_VALUE = QT_TR_NOOP("Change Value")
     ENTER_DESCRIPTION = QT_TR_NOOP("Enter the new description")
     ENTER_ADDRESS = QT_TR_NOOP("Enter the new address")
     EDIT_ADDRESS = QT_TR_NOOP("Edit Address")
