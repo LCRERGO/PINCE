@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from PyQt6.QtGui import QShortcut, QKeySequence, QIcon, QPixmap, QBrush, QColor, QKeyEvent, QMouseEvent, QContextMenuEvent, QCloseEvent
-from PyQt6.QtCore import Qt, QTimer, QSettings, QKeyCombination, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QSettings, QKeyCombination, QItemSelectionModel, pyqtSignal
 from GUI.Session.session import SessionDataChanged, SessionManager, StructureManager
 from GUI.Settings import settings
 from GUI.States import states
@@ -48,6 +48,48 @@ SEARCH_TABLE_VALUE_COL = 1
 SEARCH_TABLE_PREVIOUS_COL = 2
 
 
+class SortableAddressItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts addresses numerically instead of lexicographically"""
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        if isinstance(other, QTableWidgetItem):
+            try:
+                return int(self.text(), 16) < int(other.text(), 16)
+            except (TypeError, ValueError):
+                pass
+        return super().__lt__(other)
+
+
+class SortableValueItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts values numerically when a numeric sort key is available"""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__(text)
+        self._sort_key: int | float | None = None
+
+    def set_sort_key(self, sort_key: int | float | None) -> None:
+        self._sort_key = sort_key
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        if isinstance(other, SortableValueItem) and self._sort_key is not None and other._sort_key is not None:
+            return self._sort_key < other._sort_key
+        return super().__lt__(other)
+
+
+def get_value_sort_key(value: str, value_type: typedefs.ValueType) -> int | float | None:
+    """Returns a numeric sort key for the given value string, or None if it can't be represented numerically"""
+    if not value:
+        return None
+    try:
+        if isinstance(value_type, typedefs.FloatValueType):
+            return float(value)
+        if isinstance(value_type, typedefs.IntegerValueType):
+            return int(value, 0)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
 class ScanTabWidget(QWidget):
     def __init__(self, mainform: "MainWindow") -> None:
         super().__init__()
@@ -56,6 +98,7 @@ class ScanTabWidget(QWidget):
         self.is_scanning = False
         self.undo_scan_available = False
         self.deleted_regions: list[int] = []
+        self._selected_addresses: list[str] = []
         self.progress_bar_timer = QTimer(self, timeout=self.update_progress_bar)
         self.memscan = scancore.Libmemscan(os.path.join(utils.get_libpince_directory(), "libmemscan", "libmemscan.so"))
         self.build_ui()
@@ -96,6 +139,11 @@ class ScanTabWidget(QWidget):
         self.tableWidget_valuesearchtable.setColumnWidth(SEARCH_TABLE_ADDRESS_COL, 120)
         self.tableWidget_valuesearchtable.setColumnWidth(SEARCH_TABLE_VALUE_COL, 80)
         self.tableWidget_valuesearchtable.horizontalHeader().setSortIndicatorClearable(True)
+        self.tableWidget_valuesearchtable.setSortingEnabled(True)
+        header = self.tableWidget_valuesearchtable.horizontalHeader()
+        header.blockSignals(True)
+        header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        header.blockSignals(False)
         results_layout.addWidget(self.tableWidget_valuesearchtable)
         main_layout.addLayout(results_layout, 1)
 
@@ -242,6 +290,8 @@ class ScanTabWidget(QWidget):
         self.pushButton_NextScan.clicked.connect(self.pushButton_NextScan_clicked)
         self.pushButton_ScanRegions.clicked.connect(self.pushButton_ScanRegions_clicked)
         self.tableWidget_valuesearchtable.cellDoubleClicked.connect(self.tableWidget_valuesearchtable_cell_double_clicked)
+        self.tableWidget_valuesearchtable.horizontalHeader().sectionPressed.connect(self.remember_valuesearchtable_selection)
+        self.tableWidget_valuesearchtable.horizontalHeader().sortIndicatorChanged.connect(self.on_valuesearchtable_sort_indicator_changed)
         self.tableWidget_valuesearchtable.keyPressEvent_original = self.tableWidget_valuesearchtable.keyPressEvent
         self.tableWidget_valuesearchtable.keyPressEvent = self.tableWidget_valuesearchtable_key_press_event
         self.tableWidget_valuesearchtable.contextMenuEvent = self.tableWidget_valuesearchtable_context_menu_event
@@ -559,6 +609,11 @@ class ScanTabWidget(QWidget):
         matches = self.memscan.matches()
         self.update_match_count()
         self.tableWidget_valuesearchtable.setRowCount(0)
+        self._selected_addresses = []
+        header = self.tableWidget_valuesearchtable.horizontalHeader()
+        header.blockSignals(True)
+        header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        header.blockSignals(False)
         current_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
         scan_text = self.lineEdit_Scan.text()
         length = (
@@ -568,7 +623,6 @@ class ScanTabWidget(QWidget):
         endian = self.comboBox_Endianness.currentData(Qt.ItemDataRole.UserRole)
         with debugcore.memory_handle() as mem_handle:
             row = 0
-            self.tableWidget_valuesearchtable.setSortingEnabled(False)
             for match in matches:
                 address = hex(match.address)
                 match_info = match.match_info
@@ -601,7 +655,7 @@ class ScanTabWidget(QWidget):
                 else:
                     logger.error("Passed invalid match to value type retrieval! Shouldn't be possible!")
                     continue
-                current_item = QTableWidgetItem(address)
+                current_item = SortableAddressItem(address)
                 current_item.setData(Qt.ItemDataRole.UserRole, value_type)
                 # TODO: Change GDB reading to memscan
                 value = debugcore.read_memory(address, value_type, mem_handle=mem_handle)
@@ -623,13 +677,14 @@ class ScanTabWidget(QWidget):
                     current_item.setForeground(QColor(0, 136, 85))
                 self.tableWidget_valuesearchtable.insertRow(row)
                 self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_ADDRESS_COL, current_item)
-                self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_VALUE_COL, QTableWidgetItem(value))
+                value_item = SortableValueItem(value)
+                value_item.set_sort_key(get_value_sort_key(value, value_type))
+                self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_VALUE_COL, value_item)
                 self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_PREVIOUS_COL, QTableWidgetItem(previous_value))
                 row += 1
                 if row == 5000:
                     break
         self.tableWidget_valuesearchtable.resizeColumnsToContents()
-        self.tableWidget_valuesearchtable.setSortingEnabled(True)
 
     def update_match_count(self) -> None:
         match_count = self.memscan.get_match_count()
@@ -643,6 +698,39 @@ class ScanTabWidget(QWidget):
         vt = copy.copy(current_item.data(Qt.ItemDataRole.UserRole))
         self.mainform.add_entry_to_addresstable(tr.NO_DESCRIPTION, current_item.text(), vt)
         self.mainform.update_address_table()
+
+    def remember_valuesearchtable_selection(self, column: int = -1) -> None:
+        addresses = []
+        for index in self.tableWidget_valuesearchtable.selectionModel().selectedRows():
+            item = self.tableWidget_valuesearchtable.item(index.row(), SEARCH_TABLE_ADDRESS_COL)
+            if item is not None:
+                addresses.append(item.text())
+        self._selected_addresses = addresses
+
+    def on_valuesearchtable_sort_indicator_changed(self, column: int, order: Qt.SortOrder) -> None:
+        if column < 0:
+            return
+        # sectionPressed has already captured the selection, so the sort can safely reorder the rows now
+        addresses = list(self._selected_addresses)
+        QTimer.singleShot(0, lambda: self.restore_valuesearchtable_selection(addresses))
+
+    def restore_valuesearchtable_selection(self, addresses: list[str]) -> None:
+        if not addresses:
+            return
+        table = self.tableWidget_valuesearchtable
+        selection_model = table.selectionModel()
+        selection_model.clearSelection()
+        address_set = set(addresses)
+        first_row = -1
+        for row in range(table.rowCount()):
+            item = table.item(row, SEARCH_TABLE_ADDRESS_COL)
+            if item is not None and item.text() in address_set:
+                index = table.model().index(row, SEARCH_TABLE_ADDRESS_COL)
+                selection_model.select(index, QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+                if first_row == -1:
+                    first_row = row
+        if first_row != -1:
+            table.setCurrentCell(first_row, SEARCH_TABLE_ADDRESS_COL)
 
     def tableWidget_valuesearchtable_key_press_event(self, event: QKeyEvent) -> None:
         current_item = self.tableWidget_valuesearchtable.currentItem()
@@ -772,22 +860,22 @@ class ScanTabWidget(QWidget):
             return
         row_count = self.tableWidget_valuesearchtable.rowCount()
         if row_count > 0:
-            self.tableWidget_valuesearchtable.setSortingEnabled(False)
-            try:
-                with debugcore.memory_handle() as mem_handle:
-                    for row_index in range(row_count):
-                        address_item = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_ADDRESS_COL)
-                        value_item = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_VALUE_COL)
-                        previous_text = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_PREVIOUS_COL).text()
-                        address = address_item.text()
-                        value_type = address_item.data(Qt.ItemDataRole.UserRole)
-                        new_value = debugcore.read_memory(address, value_type, mem_handle=mem_handle)
-                        new_value = "" if new_value is None else str(new_value)
-                        if new_value != previous_text:
-                            value_item.setForeground(QBrush(QColor(255, 0, 0)))
-                        value_item.setText(new_value)
-            finally:
-                self.tableWidget_valuesearchtable.setSortingEnabled(True)
+            with debugcore.memory_handle() as mem_handle:
+                for row_index in range(row_count):
+                    address_item = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_ADDRESS_COL)
+                    value_item = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_VALUE_COL)
+                    previous_text = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_PREVIOUS_COL).text()
+                    address = address_item.text()
+                    value_type = address_item.data(Qt.ItemDataRole.UserRole)
+                    new_value = debugcore.read_memory(address, value_type, mem_handle=mem_handle)
+                    new_value = "" if new_value is None else str(new_value)
+                    if new_value != previous_text:
+                        value_item.setForeground(QBrush(QColor(255, 0, 0)))
+                    else:
+                        value_item.setData(Qt.ItemDataRole.ForegroundRole, None)
+                    value_item.setText(new_value)
+                    if isinstance(value_item, SortableValueItem):
+                        value_item.set_sort_key(get_value_sort_key(new_value, value_type))
 
     def on_new_process(self) -> None:
         self.lineEdit_Scan.setPlaceholderText(tr.SCAN_FOR)
