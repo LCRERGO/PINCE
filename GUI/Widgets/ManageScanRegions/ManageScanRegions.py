@@ -2,13 +2,13 @@ from PyQt6.QtWidgets import QDialog, QTableWidgetItem, QWidget
 from PyQt6.QtCore import Qt
 from GUI.Widgets.ManageScanRegions.Form.ManageScanRegionsDialog import Ui_Dialog
 from GUI.Utils import guiutils
-from libpince import scancore
 
 
 class ManageScanRegionsDialog(QDialog, Ui_Dialog):
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(self, parent: QWidget, memscan: object) -> None:
         super().__init__(parent)
         self.setupUi(self)
+        self.memscan = memscan
         self.deleted_regions: list[int] = []
         self.populate_table()
         guiutils.center_to_parent(self)
@@ -16,7 +16,7 @@ class ManageScanRegionsDialog(QDialog, Ui_Dialog):
         self.pushButton_Reset.clicked.connect(self.reset_regions)
 
     def populate_table(self) -> None:
-        regions = list(scancore.memscan.regions())
+        regions = list(self.memscan.regions())
         self.tableWidget_Regions.setRowCount(len(regions))
         self.tableWidget_Regions.setSortingEnabled(False)
         for row, region in enumerate(regions):
@@ -34,7 +34,7 @@ class ManageScanRegionsDialog(QDialog, Ui_Dialog):
         self.tableWidget_Regions.resizeColumnsToContents()
 
     def reset_regions(self) -> None:
-        scancore.memscan.reset()
+        self.memscan.reset()
         self.parent().deleted_regions.clear()
         self.populate_table()
 
@@ -54,5 +54,5 @@ class ManageScanRegionsDialog(QDialog, Ui_Dialog):
             if item.checkState() == Qt.CheckState.Checked:
                 region_id = int(item.text())
                 self.deleted_regions.append(region_id)
-                scancore.memscan.remove_region_by_id(int(region_id))
+                self.memscan.remove_region_by_id(int(region_id))
         return super().accept()

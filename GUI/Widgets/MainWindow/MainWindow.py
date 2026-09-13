@@ -1,4 +1,8 @@
-from PyQt6.QtWidgets import QMainWindow, QTableWidgetItem, QTreeWidgetItem, QTreeWidgetItemIterator, QMenu, QMessageBox, QCheckBox, QApplication
+from PyQt6.QtWidgets import (
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu,
+    QInputDialog, QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QTreeWidgetItem, QTreeWidgetItemIterator,
+    QVBoxLayout, QWidget,
+)
 from PyQt6.QtGui import QShortcut, QKeySequence, QIcon, QPixmap, QBrush, QColor, QKeyEvent, QMouseEvent, QContextMenuEvent, QCloseEvent
 from PyQt6.QtCore import Qt, QTimer, QSettings, QKeyCombination, pyqtSignal
 from GUI.Session.session import SessionDataChanged, SessionManager, StructureManager
@@ -41,6 +45,758 @@ VALUE_COL = 4  # Value
 SEARCH_TABLE_ADDRESS_COL = 0
 SEARCH_TABLE_VALUE_COL = 1
 SEARCH_TABLE_PREVIOUS_COL = 2
+
+
+class ScanTabWidget(QWidget):
+    def __init__(self, mainform: "MainWindow") -> None:
+        super().__init__()
+        self.mainform = mainform
+        self.scan_mode = typedefs.SCAN_MODE.NEW
+        self.is_scanning = False
+        self.undo_scan_available = False
+        self.deleted_regions: list[int] = []
+        self.progress_bar_timer = QTimer(self, timeout=self.update_progress_bar)
+        self.memscan = scancore.Libmemscan(os.path.join(utils.get_libpince_directory(), "libmemscan", "libmemscan.so"))
+        self.build_ui()
+        self.connect_signals()
+        self.comboBox_ScanScope_init()
+        self.comboBox_ValueType_init()
+        guiutils.fill_endianness_combobox(self.comboBox_Endianness)
+        guiutils.fill_alignment_combobox(self.comboBox_Alignment)
+        self.update_scan_box_state()
+
+    def build_ui(self) -> None:
+        main_layout = QHBoxLayout(self)
+        main_layout.setObjectName("scan_tab_layout")
+
+        results_layout = QVBoxLayout()
+        results_layout.setObjectName("verticalLayout_6")
+        self.label_MatchCount = QLabel(self)
+        self.label_MatchCount.setObjectName("label_MatchCount")
+        self.label_MatchCount.setText(tr.MATCH_COUNT.format(0))
+        results_layout.addWidget(self.label_MatchCount)
+        self.tableWidget_valuesearchtable = QTableWidget(self)
+        self.tableWidget_valuesearchtable.setObjectName("tableWidget_valuesearchtable")
+        self.tableWidget_valuesearchtable.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tableWidget_valuesearchtable.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tableWidget_valuesearchtable.setAlternatingRowColors(True)
+        self.tableWidget_valuesearchtable.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tableWidget_valuesearchtable.setShowGrid(False)
+        self.tableWidget_valuesearchtable.setWordWrap(False)
+        self.tableWidget_valuesearchtable.setColumnCount(3)
+        self.tableWidget_valuesearchtable.setHorizontalHeaderItem(0, QTableWidgetItem(tr.SCAN_RESULT_ADDRESS))
+        self.tableWidget_valuesearchtable.setHorizontalHeaderItem(1, QTableWidgetItem(tr.SCAN_RESULT_VALUE))
+        self.tableWidget_valuesearchtable.setHorizontalHeaderItem(2, QTableWidgetItem(tr.SCAN_RESULT_PREVIOUS))
+        self.tableWidget_valuesearchtable.horizontalHeader().setSortIndicatorShown(True)
+        self.tableWidget_valuesearchtable.horizontalHeader().setStretchLastSection(True)
+        self.tableWidget_valuesearchtable.verticalHeader().setVisible(False)
+        self.tableWidget_valuesearchtable.verticalHeader().setDefaultSectionSize(23)
+        self.tableWidget_valuesearchtable.verticalHeader().setMinimumSectionSize(20)
+        self.tableWidget_valuesearchtable.setColumnWidth(SEARCH_TABLE_ADDRESS_COL, 120)
+        self.tableWidget_valuesearchtable.setColumnWidth(SEARCH_TABLE_VALUE_COL, 80)
+        self.tableWidget_valuesearchtable.horizontalHeader().setSortIndicatorClearable(True)
+        results_layout.addWidget(self.tableWidget_valuesearchtable)
+        main_layout.addLayout(results_layout, 1)
+
+        self.widget_Scanbox = QWidget(self)
+        self.widget_Scanbox.setObjectName("widget_Scanbox")
+        self.widget_Scanbox.setEnabled(False)
+        scanbox_layout = QVBoxLayout(self.widget_Scanbox)
+        scanbox_layout.setObjectName("verticalLayout_5")
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setObjectName("horizontalLayout_ScanButtons")
+        self.pushButton_NewFirstScan = QPushButton(self.widget_Scanbox)
+        self.pushButton_NewFirstScan.setObjectName("pushButton_NewFirstScan")
+        self.pushButton_NewFirstScan.setText(tr.FIRST_SCAN)
+        buttons_layout.addWidget(self.pushButton_NewFirstScan)
+        self.pushButton_NextScan = QPushButton(self.widget_Scanbox)
+        self.pushButton_NextScan.setObjectName("pushButton_NextScan")
+        self.pushButton_NextScan.setText(tr.NEXT_SCAN)
+        buttons_layout.addWidget(self.pushButton_NextScan)
+        buttons_layout.addStretch()
+        self.pushButton_CancelScan = QPushButton(self.widget_Scanbox)
+        self.pushButton_CancelScan.setObjectName("pushButton_CancelScan")
+        self.pushButton_CancelScan.setText(tr.CANCEL_SCAN)
+        buttons_layout.addWidget(self.pushButton_CancelScan)
+        self.pushButton_UndoScan = QPushButton(self.widget_Scanbox)
+        self.pushButton_UndoScan.setObjectName("pushButton_UndoScan")
+        self.pushButton_UndoScan.setText(tr.UNDO_SCAN)
+        buttons_layout.addWidget(self.pushButton_UndoScan)
+        scanbox_layout.addLayout(buttons_layout)
+
+        self.widget_ScanFields = QWidget(self.widget_Scanbox)
+        self.widget_ScanFields.setObjectName("widget_ScanFields")
+        fields_layout = QHBoxLayout(self.widget_ScanFields)
+        fields_layout.setObjectName("horizontalLayout_7")
+        fields_layout.setContentsMargins(0, -1, 0, 0)
+        self.checkBox_Hex = QCheckBox(self.widget_ScanFields)
+        self.checkBox_Hex.setObjectName("checkBox_Hex")
+        self.checkBox_Hex.setText(tr.HEX)
+        fields_layout.addWidget(self.checkBox_Hex)
+        self.lineEdit_Scan = QLineEdit(self.widget_ScanFields)
+        self.lineEdit_Scan.setObjectName("lineEdit_Scan")
+        fields_layout.addWidget(self.lineEdit_Scan)
+        self.label_Between = QLabel(self.widget_ScanFields)
+        self.label_Between.setObjectName("label_Between")
+        self.label_Between.setText("<->")
+        fields_layout.addWidget(self.label_Between)
+        self.lineEdit_Scan2 = QLineEdit(self.widget_ScanFields)
+        self.lineEdit_Scan2.setObjectName("lineEdit_Scan2")
+        fields_layout.addWidget(self.lineEdit_Scan2)
+        scanbox_layout.addWidget(self.widget_ScanFields)
+
+        options_layout = QHBoxLayout()
+        options_layout.setObjectName("horizontalLayout_ScanOptions")
+        self.widget_ScanOptions = QWidget(self.widget_Scanbox)
+        self.widget_ScanOptions.setObjectName("widget_ScanOptions")
+        options_inner = QVBoxLayout(self.widget_ScanOptions)
+        options_inner.setObjectName("verticalLayout_4")
+
+        scan_type_layout = QHBoxLayout()
+        scan_type_layout.setObjectName("horizontalLayout_ScanType")
+        scan_type_label = QLabel(self.widget_ScanOptions)
+        scan_type_label.setText(tr.SCAN_TYPE_LABEL)
+        scan_type_layout.addWidget(scan_type_label)
+        self.comboBox_ScanType = QComboBox(self.widget_ScanOptions)
+        self.comboBox_ScanType.setObjectName("comboBox_ScanType")
+        scan_type_layout.addWidget(self.comboBox_ScanType)
+        options_inner.addLayout(scan_type_layout)
+
+        value_type_layout = QHBoxLayout()
+        value_type_layout.setObjectName("horizontalLayout_ValueType")
+        value_type_label = QLabel(self.widget_ScanOptions)
+        value_type_label.setText(tr.VALUE_TYPE_LABEL)
+        value_type_layout.addWidget(value_type_label)
+        self.comboBox_ValueType = QComboBox(self.widget_ScanOptions)
+        self.comboBox_ValueType.setObjectName("comboBox_ValueType")
+        value_type_layout.addWidget(self.comboBox_ValueType)
+        options_inner.addLayout(value_type_layout)
+
+        scan_scope_layout = QHBoxLayout()
+        scan_scope_layout.setObjectName("horizontalLayout_ScanScope")
+        scan_scope_label = QLabel(self.widget_ScanOptions)
+        scan_scope_label.setText(tr.SCAN_SCOPE_LABEL)
+        scan_scope_layout.addWidget(scan_scope_label)
+        self.comboBox_ScanScope = QComboBox(self.widget_ScanOptions)
+        self.comboBox_ScanScope.setObjectName("comboBox_ScanScope")
+        scan_scope_layout.addWidget(self.comboBox_ScanScope)
+        options_inner.addLayout(scan_scope_layout)
+
+        endianness_layout = QHBoxLayout()
+        endianness_layout.setObjectName("horizontalLayout_Endianness")
+        endianness_label = QLabel(self.widget_ScanOptions)
+        endianness_label.setText(tr.ENDIANNESS_LABEL)
+        endianness_layout.addWidget(endianness_label)
+        self.comboBox_Endianness = QComboBox(self.widget_ScanOptions)
+        self.comboBox_Endianness.setObjectName("comboBox_Endianness")
+        endianness_layout.addWidget(self.comboBox_Endianness)
+        options_inner.addLayout(endianness_layout)
+
+        alignment_layout = QHBoxLayout()
+        alignment_layout.setObjectName("horizontalLayout_Alignment")
+        alignment_label = QLabel(self.widget_ScanOptions)
+        alignment_label.setText(tr.ALIGNMENT_LABEL)
+        alignment_layout.addWidget(alignment_label)
+        self.comboBox_Alignment = QComboBox(self.widget_ScanOptions)
+        self.comboBox_Alignment.setObjectName("comboBox_Alignment")
+        alignment_layout.addWidget(self.comboBox_Alignment)
+        options_inner.addLayout(alignment_layout)
+
+        self.pushButton_ScanRegions = QPushButton(self.widget_ScanOptions)
+        self.pushButton_ScanRegions.setObjectName("pushButton_ScanRegions")
+        self.pushButton_ScanRegions.setText(tr.MANAGE_SCAN_REGIONS)
+        options_inner.addWidget(self.pushButton_ScanRegions)
+        options_inner.addStretch()
+        options_layout.addWidget(self.widget_ScanOptions)
+
+        self.widget_VerticalSpacer = QWidget(self.widget_Scanbox)
+        self.widget_VerticalSpacer.setObjectName("widget_VerticalSpacer")
+        vertical_layout = QVBoxLayout(self.widget_VerticalSpacer)
+        vertical_layout.setObjectName("verticalLayout")
+        vertical_layout.setContentsMargins(0, 0, 0, 0)
+        vertical_layout.setSpacing(0)
+        self.progressBar = QProgressBar(self.widget_VerticalSpacer)
+        self.progressBar.setObjectName("progressBar")
+        self.progressBar.setValue(0)
+        vertical_layout.addWidget(self.progressBar)
+        vertical_layout.addStretch()
+        options_layout.addWidget(self.widget_VerticalSpacer)
+        scanbox_layout.addLayout(options_layout)
+        main_layout.addWidget(self.widget_Scanbox)
+
+    def connect_signals(self) -> None:
+        self.comboBox_Endianness.currentIndexChanged.connect(self.on_endianness_changed)
+        self.comboBox_Alignment.currentIndexChanged.connect(self.comboBox_Alignment_current_index_changed)
+        self.checkBox_Hex.stateChanged.connect(self.checkBox_Hex_stateChanged)
+        self.comboBox_ValueType.currentIndexChanged.connect(self.comboBox_ValueType_current_index_changed)
+        self.comboBox_ScanType.currentIndexChanged.connect(self.comboBox_ScanType_current_index_changed)
+        self.lineEdit_Scan.keyPressEvent_original = self.lineEdit_Scan.keyPressEvent
+        self.lineEdit_Scan2.keyPressEvent_original = self.lineEdit_Scan2.keyPressEvent
+        self.lineEdit_Scan.keyPressEvent = self.lineEdit_Scan_on_key_press_event
+        self.lineEdit_Scan2.keyPressEvent = self.lineEdit_Scan2_on_key_press_event
+        self.pushButton_NewFirstScan.clicked.connect(self.pushButton_NewFirstScan_clicked)
+        self.pushButton_UndoScan.clicked.connect(self.pushButton_UndoScan_clicked)
+        self.pushButton_CancelScan.clicked.connect(self.pushButton_CancelScan_clicked)
+        self.pushButton_NextScan.clicked.connect(self.pushButton_NextScan_clicked)
+        self.pushButton_ScanRegions.clicked.connect(self.pushButton_ScanRegions_clicked)
+        self.tableWidget_valuesearchtable.cellDoubleClicked.connect(self.tableWidget_valuesearchtable_cell_double_clicked)
+        self.tableWidget_valuesearchtable.keyPressEvent_original = self.tableWidget_valuesearchtable.keyPressEvent
+        self.tableWidget_valuesearchtable.keyPressEvent = self.tableWidget_valuesearchtable_key_press_event
+        self.tableWidget_valuesearchtable.contextMenuEvent = self.tableWidget_valuesearchtable_context_menu_event
+
+    def update_scan_box_state(self) -> None:
+        if self.is_scanning == True:
+            self.pushButton_CancelScan.setEnabled(True)
+            self.pushButton_NewFirstScan.setEnabled(False)
+            self.pushButton_NextScan.setEnabled(False)
+            self.pushButton_UndoScan.setEnabled(False)
+            self.widget_ScanOptions.setEnabled(False)
+            self.widget_ScanFields.setEnabled(False)
+        else:
+            is_new_scan = self.scan_mode == typedefs.SCAN_MODE.NEW
+            self.pushButton_CancelScan.setEnabled(False)
+            self.pushButton_NewFirstScan.setEnabled(True)
+            self.pushButton_NextScan.setEnabled(not is_new_scan)
+            self.pushButton_UndoScan.setEnabled(self.undo_scan_available)
+            self.widget_ScanOptions.setEnabled(True)
+            self.comboBox_ScanType_current_index_changed()
+            self.comboBox_ScanScope.setEnabled(is_new_scan)
+            self.comboBox_ValueType.setEnabled(is_new_scan)
+            self.comboBox_Endianness.setEnabled(is_new_scan)
+            self.comboBox_Alignment.setEnabled(is_new_scan)
+            self.pushButton_ScanRegions.setEnabled(is_new_scan)
+
+    # Create properly typed values for memscan
+    def validate_search_values(self, search_for: str, search_for2: str) -> tuple[int | float | str | BytePattern | None, int | float | None]:
+        # Manually fix an edge case in number validators
+        if search_for == "-":
+            search_for = ""
+        if search_for2 == "-":
+            search_for2 = ""
+
+        if search_for == "":
+            return None, None
+
+        value_2 = None
+
+        # none of these should be possible to be true at the same time
+        scan_index = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
+        if scan_index >= typedefs.SCAN_INDEX.FLOAT_ANY and scan_index <= typedefs.SCAN_INDEX.ANY:
+            # Manually fix an edge case in float_number validator
+            if search_for[-1] in {"e", "E"}:
+                search_for += "0"
+            if len(search_for2) != 0 and search_for2[-1] in {"e", "E"}:
+                search_for2 += "0"
+            # Python's float() only accepts '.' as the decimal separator, so always normalize to '.'
+            search_for = search_for.replace(",", ".")
+            search_for2 = search_for2.replace(",", ".")
+            try:
+                value_1 = float(search_for)
+                value_2 = float(search_for2) if search_for2 != "" else None
+            except ValueError:
+                return None, None
+        elif scan_index == typedefs.SCAN_INDEX.STRING:
+            value_1 = search_for
+        elif scan_index == typedefs.SCAN_INDEX.AOB:
+            value_1 = BytePattern.from_string(search_for)
+        else:  # Integers
+            if self.checkBox_Hex.isChecked():
+                if not search_for.startswith(("0x", "-0x")):
+                    negative_str = "-" if search_for.startswith("-") else ""
+                    search_for = negative_str + "0x" + search_for.lstrip("-")
+                if search_for in {"0x", "-0x"}:
+                    return None, None
+                if search_for2 != "":
+                    if not search_for2.startswith(("0x", "-0x")):
+                        negative_str = "-" if search_for2.startswith("-") else ""
+                        search_for2 = negative_str + "0x" + search_for2.lstrip("-")
+                    if search_for2 in {"0x", "-0x"}:
+                        search_for2 = ""
+                value_1 = int(search_for, 16)
+                value_2 = int(search_for2, 16) if search_for2 != "" else None
+            else:
+                value_1 = int(search_for)
+                value_2 = int(search_for2) if search_for2 != "" else None
+
+        return value_1, value_2
+
+    def scan_values(self) -> None:
+        if debugcore.currentpid == -1:
+            return
+        is_next_scan = self.scan_mode == typedefs.SCAN_MODE.ONGOING
+        type_index = self.comboBox_ScanType.currentData(Qt.ItemDataRole.UserRole)
+        if type_index == typedefs.SCAN_TYPE.UNKNOWN:
+            scan_thread = guitypedefs.Worker(self.memscan.snapshot)
+        else:
+            value_1, value_2 = None, None
+            if self.widget_ScanFields.isEnabled():
+                search_for2 = self.lineEdit_Scan2.text() if type_index == typedefs.SCAN_TYPE.BETWEEN else ""
+                try:
+                    value_1, value_2 = self.validate_search_values(self.lineEdit_Scan.text(), search_for2)
+                except ValueError:
+                    return
+                if value_1 == None:
+                    return
+            scan_type = scancore.scan_type_to_memscan_dict[type_index]
+            scan_thread = guitypedefs.Worker(self.memscan.scan, scan_type, value_1, value_2)
+        self.progressBar.setValue(0)
+        self.progress_bar_timer.start(100)
+        scan_thread.signals.finished.connect(lambda _: self.scan_callback(is_next_scan))
+        scan_thread.signals.error.connect(lambda error: self.scan_error(error, not is_next_scan))
+        self.is_scanning = True
+        self.undo_scan_available = False
+        self.update_scan_box_state()
+        states.threadpool.start(scan_thread)
+
+
+    def pushButton_NewFirstScan_clicked(self) -> None:
+        if debugcore.currentpid == -1:
+            self.comboBox_ScanType_init()
+            return
+        if self.scan_mode == typedefs.SCAN_MODE.ONGOING:
+            self.reset_scan()
+            for region_id in self.deleted_regions:
+                self.memscan.remove_region_by_id(int(region_id))
+        else:
+            self.scan_values()
+            if self.is_scanning == True:
+                self.scan_mode = typedefs.SCAN_MODE.ONGOING
+                self.pushButton_NewFirstScan.setText(tr.NEW_SCAN)
+        self.comboBox_ScanType_init()
+
+    def handle_line_edit_scan_key_press_event(self, event: QKeyEvent) -> None:
+        valid_keys = [Qt.Key.Key_Return, Qt.Key.Key_Enter]
+        if event.key() in valid_keys and Qt.KeyboardModifier.ControlModifier in event.modifiers():
+            self.pushButton_NewFirstScan_clicked()
+            return
+
+        if event.key() in valid_keys:
+            if self.scan_mode == typedefs.SCAN_MODE.ONGOING:
+                self.pushButton_NextScan_clicked()
+            else:
+                self.pushButton_NewFirstScan_clicked()
+            return
+
+    def lineEdit_Scan_on_key_press_event(self, event: QKeyEvent) -> None:
+        self.handle_line_edit_scan_key_press_event(event)
+        self.lineEdit_Scan.keyPressEvent_original(event)
+
+    def lineEdit_Scan2_on_key_press_event(self, event: QKeyEvent) -> None:
+        self.handle_line_edit_scan_key_press_event(event)
+        self.lineEdit_Scan2.keyPressEvent_original(event)
+
+    def pushButton_UndoScan_clicked(self) -> None:
+        if debugcore.currentpid == -1:
+            return
+        undo_thread = guitypedefs.Worker(self.memscan.undo_scan)
+        undo_thread.signals.finished.connect(lambda _: self.scan_callback(False))
+        undo_thread.signals.error.connect(self.scan_error)
+        self.is_scanning = True
+        self.undo_scan_available = False
+        self.update_scan_box_state()
+        self.pushButton_CancelScan.setEnabled(False)
+        states.threadpool.start(undo_thread)
+
+    def pushButton_CancelScan_clicked(self) -> None:
+        if debugcore.currentpid == -1:
+            return
+        self.memscan.set_stop_flag(True)
+        self.pushButton_CancelScan.setEnabled(False)
+
+    def comboBox_ScanType_current_index_changed(self) -> None:
+        hidden_types = [
+            typedefs.SCAN_TYPE.INCREASED,
+            typedefs.SCAN_TYPE.DECREASED,
+            typedefs.SCAN_TYPE.CHANGED,
+            typedefs.SCAN_TYPE.UNCHANGED,
+            typedefs.SCAN_TYPE.UNKNOWN,
+        ]
+        if self.comboBox_ScanType.currentData(Qt.ItemDataRole.UserRole) in hidden_types:
+            self.widget_ScanFields.setEnabled(False)
+        else:
+            self.widget_ScanFields.setEnabled(True)
+        if self.comboBox_ScanType.currentData(Qt.ItemDataRole.UserRole) == typedefs.SCAN_TYPE.BETWEEN:
+            self.label_Between.setVisible(True)
+            self.lineEdit_Scan2.setVisible(True)
+        else:
+            self.label_Between.setVisible(False)
+            self.lineEdit_Scan2.setVisible(False)
+
+    def comboBox_ScanType_init(self) -> None:
+        scan_type_text = {
+            typedefs.SCAN_TYPE.EXACT: tr.EXACT,
+            typedefs.SCAN_TYPE.NOT: tr.NOT,
+            typedefs.SCAN_TYPE.INCREASED: tr.INCREASED,
+            typedefs.SCAN_TYPE.INCREASED_BY: tr.INCREASED_BY,
+            typedefs.SCAN_TYPE.DECREASED: tr.DECREASED,
+            typedefs.SCAN_TYPE.DECREASED_BY: tr.DECREASED_BY,
+            typedefs.SCAN_TYPE.LESS: tr.LESS_THAN,
+            typedefs.SCAN_TYPE.MORE: tr.MORE_THAN,
+            typedefs.SCAN_TYPE.BETWEEN: tr.BETWEEN,
+            typedefs.SCAN_TYPE.CHANGED: tr.CHANGED,
+            typedefs.SCAN_TYPE.UNCHANGED: tr.UNCHANGED,
+            typedefs.SCAN_TYPE.UNKNOWN: tr.UNKNOWN_VALUE,
+        }
+        current_type = self.comboBox_ScanType.currentData(Qt.ItemDataRole.UserRole)
+        value_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
+        self.comboBox_ScanType.clear()
+        items = typedefs.SCAN_TYPE.get_list(self.scan_mode, value_type)
+        for type_index in items:
+            self.comboBox_ScanType.addItem(scan_type_text[type_index], type_index)
+        idx = self.comboBox_ScanType.findData(current_type)
+        if idx >= 0:
+            self.comboBox_ScanType.setCurrentIndex(idx)
+        else:
+            self.comboBox_ScanType.setCurrentIndex(0)
+
+    def comboBox_ScanScope_init(self) -> None:
+        guiutils.fill_scope_combobox(self.comboBox_ScanScope)
+        self.comboBox_ScanScope.currentIndexChanged.connect(self.on_scan_scope_changed)
+
+    def on_scan_scope_changed(self) -> None:
+        self.deleted_regions.clear()
+        scan_level = self.comboBox_ScanScope.currentData(Qt.ItemDataRole.UserRole)
+        self.memscan.set_scan_level(scan_level)
+        self.memscan.reset()
+
+    def comboBox_Alignment_current_index_changed(self) -> None:
+        alignment = self.comboBox_Alignment.currentData(Qt.ItemDataRole.UserRole)
+        self.memscan.set_alignment(alignment)
+
+    def on_endianness_changed(self) -> None:
+        endian = self.comboBox_Endianness.currentData(Qt.ItemDataRole.UserRole)
+        if endian == typedefs.ENDIANNESS.HOST:
+            self.memscan.set_reverse_endianness(False)
+        elif endian == typedefs.ENDIANNESS.LITTLE:
+            self.memscan.set_reverse_endianness(sys.byteorder != "little")
+        elif endian == typedefs.ENDIANNESS.BIG:
+            self.memscan.set_reverse_endianness(sys.byteorder != "big")
+
+    def comboBox_ValueType_init(self) -> None:
+        self.comboBox_ValueType.clear()
+        for value_index, value_text in typedefs.scan_index_to_text_dict.items():
+            self.comboBox_ValueType.addItem(value_text, value_index)
+        self.comboBox_ValueType.setCurrentIndex(self.comboBox_ValueType.findData(typedefs.SCAN_INDEX.INT32))
+        self.comboBox_ValueType_current_index_changed()
+
+    def comboBox_ValueType_current_index_changed(self) -> None:
+        current_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
+        memscan_type = scancore.scan_index_to_memscan_dict[current_type]
+        match memscan_type:
+            case DataType.ANYINTEGER | DataType.INTEGER8 | DataType.INTEGER16 | DataType.INTEGER32 | DataType.INTEGER64:
+                validator_str = "int"
+            case DataType.ANYNUMBER | DataType.ANYFLOAT | DataType.FLOAT32 | DataType.FLOAT64:
+                validator_str = "float"
+            case DataType.STRING:
+                validator_str = "string"
+            case DataType.BYTEARRAY:
+                validator_str = "bytearray"
+
+        # TODO this can probably be made to look nicer, though it doesn't really matter
+        if "int" in validator_str:
+            validator_str = "int"
+            self.checkBox_Hex.setEnabled(True)
+            # keep hex validator if hex is checked
+            if self.checkBox_Hex.isChecked():
+                validator_str = "int_hex"
+        else:
+            self.checkBox_Hex.setChecked(False)
+            self.checkBox_Hex.setEnabled(False)
+
+        self.comboBox_ScanType_init()
+        self.lineEdit_Scan.setValidator(guiutils.validator_map[validator_str])
+        self.lineEdit_Scan2.setValidator(guiutils.validator_map[validator_str])
+        self.memscan.set_data_type(memscan_type)
+        # according to memscan instructions you should always do `reset` after changing type
+        self.memscan.reset()
+
+    def pushButton_NextScan_clicked(self) -> None:
+        self.scan_values()
+
+    def pushButton_ScanRegions_clicked(self) -> None:
+        scan_regions_dialog = ManageScanRegionsDialog(self, self.memscan)
+        if scan_regions_dialog.exec():
+            self.deleted_regions.extend(scan_regions_dialog.get_values())
+
+    def checkBox_Hex_stateChanged(self, state: int) -> None:
+        if Qt.CheckState(state) == Qt.CheckState.Checked:
+            # allows only things that are hex, can also start with 0x
+            self.lineEdit_Scan.setValidator(guiutils.validator_map.get("int_hex"))
+            self.lineEdit_Scan2.setValidator(guiutils.validator_map.get("int_hex"))
+            base, converter = 10, hex
+        else:
+            # sets it back to integers only
+            self.lineEdit_Scan.setValidator(guiutils.validator_map.get("int"))
+            self.lineEdit_Scan2.setValidator(guiutils.validator_map.get("int"))
+            base, converter = 16, str
+        if self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole) <= typedefs.SCAN_INDEX.INT64:
+            for line_edit in (self.lineEdit_Scan, self.lineEdit_Scan2):
+                try:
+                    line_edit.setText(converter(int(line_edit.text(), base)))
+                except ValueError:
+                    pass
+
+
+    def scan_error(self, error: Exception, first_scan: bool = False) -> None:
+        self.is_scanning = False
+        self.undo_scan_available = False
+        self.progress_bar_timer.stop()
+        if first_scan:
+            self.scan_mode = typedefs.SCAN_MODE.NEW
+            self.pushButton_NewFirstScan.setText(tr.FIRST_SCAN)
+            self.comboBox_ScanType_init()
+        self.update_scan_box_state()
+        QMessageBox.information(self, tr.ERROR, str(error))
+
+    def scan_callback(self, undo_available: bool) -> None:
+        self.is_scanning = False
+        self.undo_scan_available = undo_available and self.scan_mode == typedefs.SCAN_MODE.ONGOING
+        self.progress_bar_timer.stop()
+        self.progressBar.setValue(100)
+        self.update_scan_box_state()
+        matches = self.memscan.matches()
+        self.update_match_count()
+        self.tableWidget_valuesearchtable.setRowCount(0)
+        current_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
+        scan_text = self.lineEdit_Scan.text()
+        length = (
+            len(scan_text.split()) if current_type == typedefs.SCAN_INDEX.AOB else len(scan_text) if current_type == typedefs.SCAN_INDEX.STRING else 0
+        )
+        hex_values = self.checkBox_Hex.isChecked()
+        endian = self.comboBox_Endianness.currentData(Qt.ItemDataRole.UserRole)
+        with debugcore.memory_handle() as mem_handle:
+            row = 0
+            self.tableWidget_valuesearchtable.setSortingEnabled(False)
+            for match in matches:
+                address = hex(match.address)
+                match_info = match.match_info
+                if match_info.raw_bits == 0:
+                    # Ignore unknown entries (no match flags), should not happen as every received match is valid
+                    logger.error("Found invalid/unknown match! Skipping...")
+                    continue
+                # This is technically wrong because we can have multiple possible value types through a match
+                # but we'll go with the lowest matching value type
+                if hex_values:
+                    value_repr = typedefs.VALUE_REPR.HEX
+                else:
+                    value_repr = typedefs.VALUE_REPR.SIGNED if match_info.is_signed_integer_only() else typedefs.VALUE_REPR.UNSIGNED
+                if match.is_string_match():
+                    value_type = typedefs.StringValueType("utf-8", length=length, endian=endian)
+                elif match.is_bytearray_match():
+                    value_type = typedefs.ByteArrayValueType(length)
+                elif match_info.has_int8() or match_info.has_uint8():
+                    value_type = typedefs.IntegerValueType(8, value_repr=value_repr, endian=endian)
+                elif match_info.has_int16() or match_info.has_uint16():
+                    value_type = typedefs.IntegerValueType(16, value_repr=value_repr, endian=endian)
+                elif match_info.has_int32() or match_info.has_uint32():
+                    value_type = typedefs.IntegerValueType(32, value_repr=value_repr, endian=endian)
+                elif match_info.has_int64() or match_info.has_uint64():
+                    value_type = typedefs.IntegerValueType(64, value_repr=value_repr, endian=endian)
+                elif match_info.has_float32():
+                    value_type = typedefs.FloatValueType(32, endian=endian)
+                elif match_info.has_float64():
+                    value_type = typedefs.FloatValueType(64, endian=endian)
+                else:
+                    logger.error("Passed invalid match to value type retrieval! Shouldn't be possible!")
+                    continue
+                current_item = QTableWidgetItem(address)
+                current_item.setData(Qt.ItemDataRole.UserRole, value_type)
+                # TODO: Change GDB reading to memscan
+                value = debugcore.read_memory(address, value_type, mem_handle=mem_handle)
+                value = "" if value is None else str(value)
+                stored_value = match.stored_value
+                if stored_value is None:
+                    previous_value = ""
+                elif isinstance(value_type, (typedefs.ByteArrayValueType, typedefs.StringValueType)):
+                    previous_value = value_type.decode(bytes(stored_value))
+                elif isinstance(value_type, typedefs.IntegerValueType):
+                    prefix = "int" if value_type.value_repr == typedefs.VALUE_REPR.SIGNED else "uint"
+                    number = getattr(stored_value.data, f"{prefix}{value_type.bits}_value")
+                    previous_value = hex(number) if value_type.value_repr == typedefs.VALUE_REPR.HEX else str(number)
+                elif isinstance(value_type, typedefs.FloatValueType):
+                    previous_value = str(getattr(stored_value.data, f"float{value_type.bits}_value"))
+                else:
+                    previous_value = ""
+                if debugcore.is_address_static(address):
+                    current_item.setForeground(QColor(0, 136, 85))
+                self.tableWidget_valuesearchtable.insertRow(row)
+                self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_ADDRESS_COL, current_item)
+                self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_VALUE_COL, QTableWidgetItem(value))
+                self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_PREVIOUS_COL, QTableWidgetItem(previous_value))
+                row += 1
+                if row == 5000:
+                    break
+        self.tableWidget_valuesearchtable.resizeColumnsToContents()
+        self.tableWidget_valuesearchtable.setSortingEnabled(True)
+
+    def update_match_count(self) -> None:
+        match_count = self.memscan.get_match_count()
+        if match_count > 5000:
+            self.label_MatchCount.setText(tr.MATCH_COUNT_LIMITED.format(match_count, 5000))
+        else:
+            self.label_MatchCount.setText(tr.MATCH_COUNT.format(match_count))
+
+    def tableWidget_valuesearchtable_cell_double_clicked(self, row: int, col: int) -> None:
+        current_item = self.tableWidget_valuesearchtable.item(row, SEARCH_TABLE_ADDRESS_COL)
+        vt = copy.copy(current_item.data(Qt.ItemDataRole.UserRole))
+        self.mainform.add_entry_to_addresstable(tr.NO_DESCRIPTION, current_item.text(), vt)
+        self.mainform.update_address_table()
+
+    def tableWidget_valuesearchtable_key_press_event(self, event: QKeyEvent) -> None:
+        current_item = self.tableWidget_valuesearchtable.currentItem()
+        if debugcore.currentpid == -1 or not current_item:
+            return
+        current_address = self.tableWidget_valuesearchtable.item(current_item.row(), SEARCH_TABLE_ADDRESS_COL).text()
+        actions = typedefs.KeyboardModifiersTupleDict(
+            [
+                (
+                    QKeyCombination(Qt.KeyboardModifier.ControlModifier, Qt.Key.Key_C),
+                    self.copy_valuesearchtable_selection,
+                ),
+                (
+                    QKeyCombination(Qt.KeyboardModifier.ControlModifier, Qt.Key.Key_B),
+                    lambda: self.mainform.browse_region_for_address(current_address),
+                ),
+                (
+                    QKeyCombination(Qt.KeyboardModifier.ControlModifier, Qt.Key.Key_D),
+                    lambda: self.mainform.disassemble_for_address(current_address),
+                ),
+                (
+                    QKeyCombination(Qt.KeyboardModifier.NoModifier, Qt.Key.Key_Delete),
+                    self.delete_valuesearchtable_selection,
+                ),
+                (
+                    QKeyCombination(Qt.KeyboardModifier.NoModifier, Qt.Key.Key_Return),
+                    self.copy_to_address_table,
+                ),
+                (
+                    QKeyCombination(Qt.KeyboardModifier.NoModifier, Qt.Key.Key_Enter),
+                    self.copy_to_address_table,
+                ),
+            ]
+        )
+        try:
+            actions[QKeyCombination(event.modifiers(), Qt.Key(event.key()))]()
+        except KeyError:
+            self.tableWidget_valuesearchtable.keyPressEvent_original(event)
+
+    def tableWidget_valuesearchtable_context_menu_event(self, event: QContextMenuEvent) -> None:
+        selected_indexes = self.tableWidget_valuesearchtable.selectionModel().selectedRows()
+        if debugcore.currentpid == -1 or not selected_indexes:
+            return
+        current_item = self.tableWidget_valuesearchtable.currentItem()
+        if current_item is None:
+            return
+        current_row = current_item.row()
+        address = self.tableWidget_valuesearchtable.item(current_row, SEARCH_TABLE_ADDRESS_COL).text()
+        menu = QMenu()
+        if len(selected_indexes) > 1:
+            copy_selection = menu.addAction(f"{tr.COPY_ADDRESSES}[Ctrl+C]")
+        else:
+            copy_selection = menu.addAction(f"{tr.COPY_ADDRESS}[Ctrl+C]")
+        menu.addSeparator()
+        browse_region = menu.addAction(f"{tr.BROWSE_MEMORY_REGION}[Ctrl+B]")
+        disassemble = menu.addAction(f"{tr.DISASSEMBLE_ADDRESS}[Ctrl+D]")
+        menu.addSeparator()
+        delete_selection = menu.addAction(f"{tr.DELETE_SELECTION}[Del]")
+        font_size = self.tableWidget_valuesearchtable.font().pointSize()
+        menu.setStyleSheet(f"font-size: {font_size}pt;")
+        action = menu.exec(event.globalPos())
+        actions = {
+            copy_selection: self.copy_valuesearchtable_selection,
+            browse_region: lambda: self.mainform.browse_region_for_address(address),
+            disassemble: lambda: self.mainform.disassemble_for_address(address),
+            delete_selection: self.delete_valuesearchtable_selection,
+        }
+        try:
+            actions[action]()
+        except KeyError:
+            pass
+
+    def copy_valuesearchtable_selection(self) -> None:
+        selected_indexes = self.tableWidget_valuesearchtable.selectionModel().selectedRows()
+        address_list = []
+        for index in selected_indexes:
+            row = index.row()
+            address = self.tableWidget_valuesearchtable.item(row, SEARCH_TABLE_ADDRESS_COL).text()
+            address_list.append(address)
+        QApplication.clipboard().setText(" ".join(address_list))
+
+    def delete_valuesearchtable_selection(self) -> None:
+        selected_rows = self.tableWidget_valuesearchtable.selectedItems()
+        if not selected_rows:
+            return
+
+        # get the row indexes
+        rows = set()
+        for item in selected_rows:
+            rows.add(item.row())
+
+        # remove the rows from the table - removing in reverse sorted order to avoid index issues
+        for row in sorted(rows, reverse=True):
+            address = self.tableWidget_valuesearchtable.item(row, SEARCH_TABLE_ADDRESS_COL).text()
+            self.memscan.remove_match_by_address(utils.safe_str_to_int(address, 16))
+            self.tableWidget_valuesearchtable.removeRow(row)
+        self.update_match_count()
+
+    def copy_to_address_table(self) -> None:
+        selected_indexes = self.tableWidget_valuesearchtable.selectionModel().selectedRows()
+        for index in selected_indexes:
+            address_item = self.tableWidget_valuesearchtable.item(index.row(), SEARCH_TABLE_ADDRESS_COL)
+            vt = copy.copy(address_item.data(Qt.ItemDataRole.UserRole))
+            self.mainform.add_entry_to_addresstable(tr.NO_DESCRIPTION, address_item.text(), vt)
+        self.mainform.update_address_table()
+        self.mainform.mark_address_tree_changed()
+
+    def reset_scan(self, inferior_exit: bool = False) -> None:
+        if inferior_exit:
+            self.memscan.detach()
+        else:
+            self.memscan.reset()
+        self.scan_mode = typedefs.SCAN_MODE.NEW
+        self.undo_scan_available = False
+        self.pushButton_NewFirstScan.setText(tr.FIRST_SCAN)
+        self.tableWidget_valuesearchtable.setRowCount(0)
+        self.update_scan_box_state()
+        self.progressBar.setValue(0)
+        self.label_MatchCount.setText(tr.MATCH_COUNT.format(0))
+
+    def update_progress_bar(self) -> None:
+        value = int(round(self.memscan.get_scan_progress() * 100))
+        self.progressBar.setValue(value)
+
+    def update_search_table(self) -> None:
+        if debugcore.currentpid == -1:
+            return
+        row_count = self.tableWidget_valuesearchtable.rowCount()
+        if row_count > 0:
+            self.tableWidget_valuesearchtable.setSortingEnabled(False)
+            try:
+                with debugcore.memory_handle() as mem_handle:
+                    for row_index in range(row_count):
+                        address_item = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_ADDRESS_COL)
+                        value_item = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_VALUE_COL)
+                        previous_text = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_PREVIOUS_COL).text()
+                        address = address_item.text()
+                        value_type = address_item.data(Qt.ItemDataRole.UserRole)
+                        new_value = debugcore.read_memory(address, value_type, mem_handle=mem_handle)
+                        new_value = "" if new_value is None else str(new_value)
+                        if new_value != previous_text:
+                            value_item.setForeground(QBrush(QColor(255, 0, 0)))
+                        value_item.setText(new_value)
+            finally:
+                self.tableWidget_valuesearchtable.setSortingEnabled(True)
+
+    def on_new_process(self) -> None:
+        self.lineEdit_Scan.setPlaceholderText(tr.SCAN_FOR)
+        self.widget_Scanbox.setEnabled(True)
+        self.update_scan_box_state()
+
+    def on_inferior_exit(self) -> None:
+        self.widget_Scanbox.setEnabled(False)
+        self.lineEdit_Scan.setText("")
+        self.reset_scan(inferior_exit=True)
 
 
 class MainWindow(QMainWindow, Ui_MainWindow):
@@ -96,9 +852,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.treeWidget_AddressTable.setColumnWidth(DESC_COL, 150)
         self.treeWidget_AddressTable.setColumnWidth(ADDR_COL, 150)
         self.treeWidget_AddressTable.setColumnWidth(TYPE_COL, 150)
-        self.tableWidget_valuesearchtable.setColumnWidth(SEARCH_TABLE_ADDRESS_COL, 120)
-        self.tableWidget_valuesearchtable.setColumnWidth(SEARCH_TABLE_VALUE_COL, 80)
-        self.tableWidget_valuesearchtable.horizontalHeader().setSortIndicatorClearable(True)
         self.await_exit_thread = guitypedefs.AwaitProcessExit()
         self.auto_attach_timer = QTimer(self, timeout=self.auto_attach_loop)
 
@@ -106,6 +859,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.settings_changed()
         self.memory_view_window = MemoryViewWindow(self)
         self.session_notes = SessionNotesWidget(None)
+        self.setup_scan_tabs()
 
         if os.environ.get("APPDIR"):
             gdb_path = utils.get_default_gdb_path()
@@ -155,29 +909,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.pushButton_CheckForUpdates.hide()
         self.libpince_engine_window: LibpinceEngineWindow | None = None
         self.structures_window: StructuresWindow | None = None
-        self.pushButton_NewFirstScan.clicked.connect(self.pushButton_NewFirstScan_clicked)
-        self.pushButton_UndoScan.clicked.connect(self.pushButton_UndoScan_clicked)
-        self.pushButton_CancelScan.clicked.connect(self.pushButton_CancelScan_clicked)
-        self.pushButton_NextScan.clicked.connect(self.pushButton_NextScan_clicked)
-        self.pushButton_ScanRegions.clicked.connect(self.pushButton_ScanRegions_clicked)
-        self.scan_mode = typedefs.SCAN_MODE.NEW
-        self.pushButton_NewFirstScan_clicked()
-        self.comboBox_ScanScope_init()
-        self.comboBox_ValueType_init()
-        guiutils.fill_endianness_combobox(self.comboBox_Endianness)
-        guiutils.fill_alignment_combobox(self.comboBox_Alignment)
-        self.comboBox_Endianness.currentIndexChanged.connect(self.on_endianness_changed)
-        self.comboBox_Alignment.currentIndexChanged.connect(self.comboBox_Alignment_current_index_changed)
-        self.checkBox_Hex.stateChanged.connect(self.checkBox_Hex_stateChanged)
-        self.comboBox_ValueType.currentIndexChanged.connect(self.comboBox_ValueType_current_index_changed)
-        self.lineEdit_Scan.setValidator(guiutils.validator_map.get("int"))
-        self.lineEdit_Scan2.setValidator(guiutils.validator_map.get("int"))
-        self.lineEdit_Scan_keyPressEvent_original = self.lineEdit_Scan.keyPressEvent
-        self.lineEdit_Scan2_keyPressEvent_original = self.lineEdit_Scan2.keyPressEvent
-        self.lineEdit_Scan.keyPressEvent = self.lineEdit_Scan_on_key_press_event
-        self.lineEdit_Scan2.keyPressEvent = self.lineEdit_Scan2_on_key_press_event
-        self.comboBox_ScanType.currentIndexChanged.connect(self.comboBox_ScanType_current_index_changed)
-        self.comboBox_ScanType_current_index_changed()
         self.pushButton_Settings.clicked.connect(self.pushButton_Settings_clicked)
         self.pushButton_Console.clicked.connect(self.pushButton_Console_clicked)
         self.pushButton_Wiki.clicked.connect(self.pushButton_Wiki_clicked)
@@ -187,10 +918,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.pushButton_RefreshAddressTable.clicked.connect(self.pushButton_RefreshAddressTable_clicked)
         self.pushButton_CopyToAddressTable.clicked.connect(self.copy_to_address_table)
         self.pushButton_CleanAddressTable.clicked.connect(self.clear_address_table)
-        self.tableWidget_valuesearchtable.cellDoubleClicked.connect(self.tableWidget_valuesearchtable_cell_double_clicked)
-        self.tableWidget_valuesearchtable_keyPressEvent_original = self.tableWidget_valuesearchtable.keyPressEvent
-        self.tableWidget_valuesearchtable.keyPressEvent = self.tableWidget_valuesearchtable_key_press_event
-        self.tableWidget_valuesearchtable.contextMenuEvent = self.tableWidget_valuesearchtable_context_menu_event
         self.treeWidget_AddressTable.itemDoubleClicked.connect(self.treeWidget_AddressTable_item_double_clicked)
         self.treeWidget_AddressTable.expanded.connect(self.resize_address_table)
         self.treeWidget_AddressTable.collapsed.connect(self.resize_address_table)
@@ -208,16 +935,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.pushButton_Console.setIcon(QIcon(QPixmap(icons_directory + "/application_xp_terminal.png")))
         self.pushButton_Wiki.setIcon(QIcon(QPixmap(icons_directory + "/book_open.png")))
         self.pushButton_About.setIcon(QIcon(QPixmap(icons_directory + "/information.png")))
-        self.pushButton_NextScan.setEnabled(False)
-        self.pushButton_UndoScan.setEnabled(False)
-        self.pushButton_CancelScan.setEnabled(False)
         self.flashAttachButton = True
         self.flashAttachButtonTimer = QTimer(self)
         self.flashAttachButtonTimer.timeout.connect(self.flash_attach_button)
         self.flashAttachButton_gradientState = 0
         self.flashAttachButtonTimer.start(100)
-        self.is_scanning = False
-        self.undo_scan_available = False
 
         self.pushButton_Notes.clicked.connect(self.session_notes.toggle_visibility)
         guiutils.center(self)
@@ -361,13 +1083,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.nextscan_requested.emit(index)
 
     def on_nextscan_requested(self, index: int) -> None:
-        if self.scan_mode == typedefs.SCAN_MODE.NEW or self.is_scanning:
+        tab = self.current_scan_tab
+        if tab.scan_mode == typedefs.SCAN_MODE.NEW or tab.is_scanning:
             return
-        row = self.comboBox_ScanType.findData(index)
+        row = tab.comboBox_ScanType.findData(index)
         if row == -1:
             return
-        self.comboBox_ScanType.setCurrentIndex(row)
-        self.pushButton_NextScan.clicked.emit()
+        tab.comboBox_ScanType.setCurrentIndex(row)
+        tab.pushButton_NextScan.clicked.emit()
 
     def treeWidget_AddressTable_context_menu_event(self, event: QContextMenuEvent) -> None:
         current_row = guiutils.get_current_item(self.treeWidget_AddressTable)
@@ -953,110 +1676,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 value = "" if value is None else str(value)
                 row.setText(VALUE_COL, value)
 
-    def update_scan_box_state(self) -> None:
-        if self.is_scanning == True:
-            self.pushButton_CancelScan.setEnabled(True)
-            self.pushButton_NewFirstScan.setEnabled(False)
-            self.pushButton_NextScan.setEnabled(False)
-            self.pushButton_UndoScan.setEnabled(False)
-            self.widget_ScanOptions.setEnabled(False)
-            self.widget_ScanFields.setEnabled(False)
-        else:
-            is_new_scan = self.scan_mode == typedefs.SCAN_MODE.NEW
-            self.pushButton_CancelScan.setEnabled(False)
-            self.pushButton_NewFirstScan.setEnabled(True)
-            self.pushButton_NextScan.setEnabled(not is_new_scan)
-            self.pushButton_UndoScan.setEnabled(self.undo_scan_available)
-            self.widget_ScanOptions.setEnabled(True)
-            self.comboBox_ScanType_current_index_changed()
-            self.comboBox_ScanScope.setEnabled(is_new_scan)
-            self.comboBox_ValueType.setEnabled(is_new_scan)
-            self.comboBox_Endianness.setEnabled(is_new_scan)
-            self.comboBox_Alignment.setEnabled(is_new_scan)
-            self.pushButton_ScanRegions.setEnabled(is_new_scan)
-
     # Create properly typed values for memscan
-    def validate_search_values(self, search_for: str, search_for2: str) -> tuple[int | float | str | BytePattern | None, int | float | None]:
-        # Manually fix an edge case in number validators
-        if search_for == "-":
-            search_for = ""
-        if search_for2 == "-":
-            search_for2 = ""
-
-        if search_for == "":
-            return None, None
-
-        value_2 = None
-
-        # none of these should be possible to be true at the same time
-        scan_index = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
-        if scan_index >= typedefs.SCAN_INDEX.FLOAT_ANY and scan_index <= typedefs.SCAN_INDEX.ANY:
-            # Manually fix an edge case in float_number validator
-            if search_for[-1] in {"e", "E"}:
-                search_for += "0"
-            if len(search_for2) != 0 and search_for2[-1] in {"e", "E"}:
-                search_for2 += "0"
-            # Python's float() only accepts '.' as the decimal separator, so always normalize to '.'
-            search_for = search_for.replace(",", ".")
-            search_for2 = search_for2.replace(",", ".")
-            try:
-                value_1 = float(search_for)
-                value_2 = float(search_for2) if search_for2 != "" else None
-            except ValueError:
-                return None, None
-        elif scan_index == typedefs.SCAN_INDEX.STRING:
-            value_1 = search_for
-        elif scan_index == typedefs.SCAN_INDEX.AOB:
-            value_1 = BytePattern.from_string(search_for)
-        else:  # Integers
-            if self.checkBox_Hex.isChecked():
-                if not search_for.startswith(("0x", "-0x")):
-                    negative_str = "-" if search_for.startswith("-") else ""
-                    search_for = negative_str + "0x" + search_for.lstrip("-")
-                if search_for in {"0x", "-0x"}:
-                    return None, None
-                if search_for2 != "":
-                    if not search_for2.startswith(("0x", "-0x")):
-                        negative_str = "-" if search_for2.startswith("-") else ""
-                        search_for2 = negative_str + "0x" + search_for2.lstrip("-")
-                    if search_for2 in {"0x", "-0x"}:
-                        search_for2 = ""
-                value_1 = int(search_for, 16)
-                value_2 = int(search_for2, 16) if search_for2 != "" else None
-            else:
-                value_1 = int(search_for)
-                value_2 = int(search_for2) if search_for2 != "" else None
-
-        return value_1, value_2
-
-    def scan_values(self) -> None:
-        if debugcore.currentpid == -1:
-            return
-        is_next_scan = self.scan_mode == typedefs.SCAN_MODE.ONGOING
-        type_index = self.comboBox_ScanType.currentData(Qt.ItemDataRole.UserRole)
-        if type_index == typedefs.SCAN_TYPE.UNKNOWN:
-            scan_thread = guitypedefs.Worker(memscan.snapshot)
-        else:
-            value_1, value_2 = None, None
-            if self.widget_ScanFields.isEnabled():
-                search_for2 = self.lineEdit_Scan2.text() if type_index == typedefs.SCAN_TYPE.BETWEEN else ""
-                try:
-                    value_1, value_2 = self.validate_search_values(self.lineEdit_Scan.text(), search_for2)
-                except ValueError:
-                    return
-                if value_1 == None:
-                    return
-            scan_type = scancore.scan_type_to_memscan_dict[type_index]
-            scan_thread = guitypedefs.Worker(memscan.scan, scan_type, value_1, value_2)
-        self.progressBar.setValue(0)
-        self.progress_bar_timer = QTimer(self, timeout=self.update_progress_bar)
-        self.progress_bar_timer.start(100)
-        scan_thread.signals.finished.connect(lambda _: self.scan_callback(is_next_scan))
-        scan_thread.signals.error.connect(lambda error: self.scan_error(error, not is_next_scan))
-        self.is_scanning = True
-        self.undo_scan_available = False
-        self.update_scan_box_state()
-        states.threadpool.start(scan_thread)
 
     def resize_address_table(self) -> None:
         self.treeWidget_AddressTable.resizeColumnToContents(FROZEN_COL)
@@ -1143,395 +1763,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         console_widget.attach_state_changed.connect(self.sync_attach_state)
         console_widget.showMaximized()
 
-    def checkBox_Hex_stateChanged(self, state: int) -> None:
-        if Qt.CheckState(state) == Qt.CheckState.Checked:
-            # allows only things that are hex, can also start with 0x
-            self.lineEdit_Scan.setValidator(guiutils.validator_map.get("int_hex"))
-            self.lineEdit_Scan2.setValidator(guiutils.validator_map.get("int_hex"))
-            base, converter = 10, hex
-        else:
-            # sets it back to integers only
-            self.lineEdit_Scan.setValidator(guiutils.validator_map.get("int"))
-            self.lineEdit_Scan2.setValidator(guiutils.validator_map.get("int"))
-            base, converter = 16, str
-        if self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole) <= typedefs.SCAN_INDEX.INT64:
-            for line_edit in (self.lineEdit_Scan, self.lineEdit_Scan2):
-                try:
-                    line_edit.setText(converter(int(line_edit.text(), base)))
-                except ValueError:
-                    pass
-
-    def pushButton_NewFirstScan_clicked(self) -> None:
-        if debugcore.currentpid == -1:
-            self.comboBox_ScanType_init()
-            return
-        if self.scan_mode == typedefs.SCAN_MODE.ONGOING:
-            self.reset_scan()
-            for region_id in self.deleted_regions:
-                scancore.memscan.remove_region_by_id(int(region_id))
-        else:
-            self.scan_values()
-            if self.is_scanning == True:
-                self.scan_mode = typedefs.SCAN_MODE.ONGOING
-                self.pushButton_NewFirstScan.setText(tr.NEW_SCAN)
-        self.comboBox_ScanType_init()
-
-    def handle_line_edit_scan_key_press_event(self, event: QKeyEvent) -> None:
-        valid_keys = [Qt.Key.Key_Return, Qt.Key.Key_Enter]
-        if event.key() in valid_keys and Qt.KeyboardModifier.ControlModifier in event.modifiers():
-            self.pushButton_NewFirstScan_clicked()
-            return
-
-        if event.key() in valid_keys:
-            if self.scan_mode == typedefs.SCAN_MODE.ONGOING:
-                self.pushButton_NextScan_clicked()
-            else:
-                self.pushButton_NewFirstScan_clicked()
-            return
-
-    def lineEdit_Scan_on_key_press_event(self, event: QKeyEvent) -> None:
-        self.handle_line_edit_scan_key_press_event(event)
-        self.lineEdit_Scan_keyPressEvent_original(event)
-
-    def lineEdit_Scan2_on_key_press_event(self, event: QKeyEvent) -> None:
-        self.handle_line_edit_scan_key_press_event(event)
-        self.lineEdit_Scan2_keyPressEvent_original(event)
-
-    def pushButton_UndoScan_clicked(self) -> None:
-        if debugcore.currentpid == -1:
-            return
-        undo_thread = guitypedefs.Worker(memscan.undo_scan)
-        undo_thread.signals.finished.connect(lambda _: self.scan_callback(False))
-        undo_thread.signals.error.connect(self.scan_error)
-        self.is_scanning = True
-        self.undo_scan_available = False
-        self.update_scan_box_state()
-        self.pushButton_CancelScan.setEnabled(False)
-        states.threadpool.start(undo_thread)
-
-    def pushButton_CancelScan_clicked(self) -> None:
-        if debugcore.currentpid == -1:
-            return
-        memscan.set_stop_flag(True)
-        self.pushButton_CancelScan.setEnabled(False)
-
-    def comboBox_ScanType_current_index_changed(self) -> None:
-        hidden_types = [
-            typedefs.SCAN_TYPE.INCREASED,
-            typedefs.SCAN_TYPE.DECREASED,
-            typedefs.SCAN_TYPE.CHANGED,
-            typedefs.SCAN_TYPE.UNCHANGED,
-            typedefs.SCAN_TYPE.UNKNOWN,
-        ]
-        if self.comboBox_ScanType.currentData(Qt.ItemDataRole.UserRole) in hidden_types:
-            self.widget_ScanFields.setEnabled(False)
-        else:
-            self.widget_ScanFields.setEnabled(True)
-        if self.comboBox_ScanType.currentData(Qt.ItemDataRole.UserRole) == typedefs.SCAN_TYPE.BETWEEN:
-            self.label_Between.setVisible(True)
-            self.lineEdit_Scan2.setVisible(True)
-        else:
-            self.label_Between.setVisible(False)
-            self.lineEdit_Scan2.setVisible(False)
-
-    def comboBox_ScanType_init(self) -> None:
-        scan_type_text = {
-            typedefs.SCAN_TYPE.EXACT: tr.EXACT,
-            typedefs.SCAN_TYPE.NOT: tr.NOT,
-            typedefs.SCAN_TYPE.INCREASED: tr.INCREASED,
-            typedefs.SCAN_TYPE.INCREASED_BY: tr.INCREASED_BY,
-            typedefs.SCAN_TYPE.DECREASED: tr.DECREASED,
-            typedefs.SCAN_TYPE.DECREASED_BY: tr.DECREASED_BY,
-            typedefs.SCAN_TYPE.LESS: tr.LESS_THAN,
-            typedefs.SCAN_TYPE.MORE: tr.MORE_THAN,
-            typedefs.SCAN_TYPE.BETWEEN: tr.BETWEEN,
-            typedefs.SCAN_TYPE.CHANGED: tr.CHANGED,
-            typedefs.SCAN_TYPE.UNCHANGED: tr.UNCHANGED,
-            typedefs.SCAN_TYPE.UNKNOWN: tr.UNKNOWN_VALUE,
-        }
-        current_type = self.comboBox_ScanType.currentData(Qt.ItemDataRole.UserRole)
-        value_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
-        self.comboBox_ScanType.clear()
-        items = typedefs.SCAN_TYPE.get_list(self.scan_mode, value_type)
-        for type_index in items:
-            self.comboBox_ScanType.addItem(scan_type_text[type_index], type_index)
-        idx = self.comboBox_ScanType.findData(current_type)
-        if idx >= 0:
-            self.comboBox_ScanType.setCurrentIndex(idx)
-        else:
-            self.comboBox_ScanType.setCurrentIndex(0)
-
-    def comboBox_ScanScope_init(self) -> None:
-        guiutils.fill_scope_combobox(self.comboBox_ScanScope)
-        self.comboBox_ScanScope.currentIndexChanged.connect(self.on_scan_scope_changed)
-
-    def on_scan_scope_changed(self) -> None:
-        self.deleted_regions.clear()
-        scan_level = self.comboBox_ScanScope.currentData(Qt.ItemDataRole.UserRole)
-        memscan.set_scan_level(scan_level)
-        memscan.reset()
-
-    def comboBox_Alignment_current_index_changed(self) -> None:
-        alignment = self.comboBox_Alignment.currentData(Qt.ItemDataRole.UserRole)
-        memscan.set_alignment(alignment)
-
-    def on_endianness_changed(self) -> None:
-        endian = self.comboBox_Endianness.currentData(Qt.ItemDataRole.UserRole)
-        if endian == typedefs.ENDIANNESS.HOST:
-            memscan.set_reverse_endianness(False)
-        elif endian == typedefs.ENDIANNESS.LITTLE:
-            memscan.set_reverse_endianness(sys.byteorder != "little")
-        elif endian == typedefs.ENDIANNESS.BIG:
-            memscan.set_reverse_endianness(sys.byteorder != "big")
-
-    def comboBox_ValueType_init(self) -> None:
-        self.comboBox_ValueType.clear()
-        for value_index, value_text in typedefs.scan_index_to_text_dict.items():
-            self.comboBox_ValueType.addItem(value_text, value_index)
-        self.comboBox_ValueType.setCurrentIndex(self.comboBox_ValueType.findData(typedefs.SCAN_INDEX.INT32))
-        self.comboBox_ValueType_current_index_changed()
-
-    def pushButton_NextScan_clicked(self) -> None:
-        self.scan_values()
-
-    def pushButton_ScanRegions_clicked(self) -> None:
-        scan_regions_dialog = ManageScanRegionsDialog(self)
-        if scan_regions_dialog.exec():
-            self.deleted_regions.extend(scan_regions_dialog.get_values())
-
-    def scan_error(self, error: Exception, first_scan: bool = False) -> None:
-        self.is_scanning = False
-        self.undo_scan_available = False
-        self.progress_bar_timer.stop()
-        if first_scan:
-            self.scan_mode = typedefs.SCAN_MODE.NEW
-            self.pushButton_NewFirstScan.setText(tr.FIRST_SCAN)
-            self.comboBox_ScanType_init()
-        self.update_scan_box_state()
-        QMessageBox.information(self, tr.ERROR, str(error))
-
-    def scan_callback(self, undo_available: bool) -> None:
-        self.is_scanning = False
-        self.undo_scan_available = undo_available and self.scan_mode == typedefs.SCAN_MODE.ONGOING
-        self.progress_bar_timer.stop()
-        self.progressBar.setValue(100)
-        self.update_scan_box_state()
-        matches = memscan.matches()
-        self.update_match_count()
-        self.tableWidget_valuesearchtable.setRowCount(0)
-        current_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
-        scan_text = self.lineEdit_Scan.text()
-        length = (
-            len(scan_text.split()) if current_type == typedefs.SCAN_INDEX.AOB else len(scan_text) if current_type == typedefs.SCAN_INDEX.STRING else 0
-        )
-        hex_values = self.checkBox_Hex.isChecked()
-        endian = self.comboBox_Endianness.currentData(Qt.ItemDataRole.UserRole)
-        with debugcore.memory_handle() as mem_handle:
-            row = 0
-            self.tableWidget_valuesearchtable.setSortingEnabled(False)
-            for match in matches:
-                address = hex(match.address)
-                match_info = match.match_info
-                if match_info.raw_bits == 0:
-                    # Ignore unknown entries (no match flags), should not happen as every received match is valid
-                    logger.error("Found invalid/unknown match! Skipping...")
-                    continue
-                # This is technically wrong because we can have multiple possible value types through a match
-                # but we'll go with the lowest matching value type
-                if hex_values:
-                    value_repr = typedefs.VALUE_REPR.HEX
-                else:
-                    value_repr = typedefs.VALUE_REPR.SIGNED if match_info.is_signed_integer_only() else typedefs.VALUE_REPR.UNSIGNED
-                if match.is_string_match():
-                    value_type = typedefs.StringValueType("utf-8", length=length, endian=endian)
-                elif match.is_bytearray_match():
-                    value_type = typedefs.ByteArrayValueType(length)
-                elif match_info.has_int8() or match_info.has_uint8():
-                    value_type = typedefs.IntegerValueType(8, value_repr=value_repr, endian=endian)
-                elif match_info.has_int16() or match_info.has_uint16():
-                    value_type = typedefs.IntegerValueType(16, value_repr=value_repr, endian=endian)
-                elif match_info.has_int32() or match_info.has_uint32():
-                    value_type = typedefs.IntegerValueType(32, value_repr=value_repr, endian=endian)
-                elif match_info.has_int64() or match_info.has_uint64():
-                    value_type = typedefs.IntegerValueType(64, value_repr=value_repr, endian=endian)
-                elif match_info.has_float32():
-                    value_type = typedefs.FloatValueType(32, endian=endian)
-                elif match_info.has_float64():
-                    value_type = typedefs.FloatValueType(64, endian=endian)
-                else:
-                    logger.error("Passed invalid match to value type retrieval! Shouldn't be possible!")
-                    continue
-                current_item = QTableWidgetItem(address)
-                current_item.setData(Qt.ItemDataRole.UserRole, value_type)
-                # TODO: Change GDB reading to memscan
-                value = debugcore.read_memory(address, value_type, mem_handle=mem_handle)
-                value = "" if value is None else str(value)
-                stored_value = match.stored_value
-                if stored_value is None:
-                    previous_value = ""
-                elif isinstance(value_type, (typedefs.ByteArrayValueType, typedefs.StringValueType)):
-                    previous_value = value_type.decode(bytes(stored_value))
-                elif isinstance(value_type, typedefs.IntegerValueType):
-                    prefix = "int" if value_type.value_repr == typedefs.VALUE_REPR.SIGNED else "uint"
-                    number = getattr(stored_value.data, f"{prefix}{value_type.bits}_value")
-                    previous_value = hex(number) if value_type.value_repr == typedefs.VALUE_REPR.HEX else str(number)
-                elif isinstance(value_type, typedefs.FloatValueType):
-                    previous_value = str(getattr(stored_value.data, f"float{value_type.bits}_value"))
-                else:
-                    previous_value = ""
-                if debugcore.is_address_static(address):
-                    current_item.setForeground(QColor(0, 136, 85))
-                self.tableWidget_valuesearchtable.insertRow(row)
-                self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_ADDRESS_COL, current_item)
-                self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_VALUE_COL, QTableWidgetItem(value))
-                self.tableWidget_valuesearchtable.setItem(row, SEARCH_TABLE_PREVIOUS_COL, QTableWidgetItem(previous_value))
-                row += 1
-                if row == 5000:
-                    break
-        self.tableWidget_valuesearchtable.resizeColumnsToContents()
-        self.tableWidget_valuesearchtable.setSortingEnabled(True)
-
-    def update_match_count(self) -> None:
-        match_count = memscan.get_match_count()
-        if match_count > 5000:
-            self.label_MatchCount.setText(tr.MATCH_COUNT_LIMITED.format(match_count, 5000))
-        else:
-            self.label_MatchCount.setText(tr.MATCH_COUNT.format(match_count))
-
-    def tableWidget_valuesearchtable_cell_double_clicked(self, row: int, col: int) -> None:
-        current_item = self.tableWidget_valuesearchtable.item(row, SEARCH_TABLE_ADDRESS_COL)
-        vt = copy.copy(current_item.data(Qt.ItemDataRole.UserRole))
-        self.add_entry_to_addresstable(tr.NO_DESCRIPTION, current_item.text(), vt)
-        self.update_address_table()
-
-    def tableWidget_valuesearchtable_key_press_event(self, event: QKeyEvent) -> None:
-        current_item = self.tableWidget_valuesearchtable.currentItem()
-        if debugcore.currentpid == -1 or not current_item:
-            return
-        current_address = self.tableWidget_valuesearchtable.item(current_item.row(), SEARCH_TABLE_ADDRESS_COL).text()
-        actions = typedefs.KeyboardModifiersTupleDict(
-            [
-                (
-                    QKeyCombination(Qt.KeyboardModifier.ControlModifier, Qt.Key.Key_C),
-                    self.copy_valuesearchtable_selection,
-                ),
-                (
-                    QKeyCombination(Qt.KeyboardModifier.ControlModifier, Qt.Key.Key_B),
-                    lambda: self.browse_region_for_address(current_address),
-                ),
-                (
-                    QKeyCombination(Qt.KeyboardModifier.ControlModifier, Qt.Key.Key_D),
-                    lambda: self.disassemble_for_address(current_address),
-                ),
-                (
-                    QKeyCombination(Qt.KeyboardModifier.NoModifier, Qt.Key.Key_Delete),
-                    self.delete_valuesearchtable_selection,
-                ),
-                (
-                    QKeyCombination(Qt.KeyboardModifier.NoModifier, Qt.Key.Key_Return),
-                    self.copy_to_address_table,
-                ),
-                (
-                    QKeyCombination(Qt.KeyboardModifier.NoModifier, Qt.Key.Key_Enter),
-                    self.copy_to_address_table,
-                ),
-            ]
-        )
-        try:
-            actions[QKeyCombination(event.modifiers(), Qt.Key(event.key()))]()
-        except KeyError:
-            self.tableWidget_valuesearchtable_keyPressEvent_original(event)
-
-    def tableWidget_valuesearchtable_context_menu_event(self, event: QContextMenuEvent) -> None:
-        selected_indexes = self.tableWidget_valuesearchtable.selectionModel().selectedRows()
-        if debugcore.currentpid == -1 or not selected_indexes:
-            return
-        current_item = self.tableWidget_valuesearchtable.currentItem()
-        if current_item is None:
-            return
-        current_row = current_item.row()
-        address = self.tableWidget_valuesearchtable.item(current_row, SEARCH_TABLE_ADDRESS_COL).text()
-        menu = QMenu()
-        if len(selected_indexes) > 1:
-            copy_selection = menu.addAction(f"{tr.COPY_ADDRESSES}[Ctrl+C]")
-        else:
-            copy_selection = menu.addAction(f"{tr.COPY_ADDRESS}[Ctrl+C]")
-        menu.addSeparator()
-        browse_region = menu.addAction(f"{tr.BROWSE_MEMORY_REGION}[Ctrl+B]")
-        disassemble = menu.addAction(f"{tr.DISASSEMBLE_ADDRESS}[Ctrl+D]")
-        menu.addSeparator()
-        delete_selection = menu.addAction(f"{tr.DELETE_SELECTION}[Del]")
-        font_size = self.tableWidget_valuesearchtable.font().pointSize()
-        menu.setStyleSheet(f"font-size: {font_size}pt;")
-        action = menu.exec(event.globalPos())
-        actions = {
-            copy_selection: self.copy_valuesearchtable_selection,
-            browse_region: lambda: self.browse_region_for_address(address),
-            disassemble: lambda: self.disassemble_for_address(address),
-            delete_selection: self.delete_valuesearchtable_selection,
-        }
-        try:
-            actions[action]()
-        except KeyError:
-            pass
-
-    def copy_valuesearchtable_selection(self) -> None:
-        selected_indexes = self.tableWidget_valuesearchtable.selectionModel().selectedRows()
-        address_list = []
-        for index in selected_indexes:
-            row = index.row()
-            address = self.tableWidget_valuesearchtable.item(row, SEARCH_TABLE_ADDRESS_COL).text()
-            address_list.append(address)
-        QApplication.clipboard().setText(" ".join(address_list))
-
-    def delete_valuesearchtable_selection(self) -> None:
-        selected_rows = self.tableWidget_valuesearchtable.selectedItems()
-        if not selected_rows:
-            return
-
-        # get the row indexes
-        rows = set()
-        for item in selected_rows:
-            rows.add(item.row())
-
-        # remove the rows from the table - removing in reverse sorted order to avoid index issues
-        for row in sorted(rows, reverse=True):
-            address = self.tableWidget_valuesearchtable.item(row, SEARCH_TABLE_ADDRESS_COL).text()
-            memscan.remove_match_by_address(utils.safe_str_to_int(address, 16))
-            self.tableWidget_valuesearchtable.removeRow(row)
-        self.update_match_count()
-
-    def comboBox_ValueType_current_index_changed(self) -> None:
-        current_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
-        memscan_type = scancore.scan_index_to_memscan_dict[current_type]
-        match memscan_type:
-            case DataType.ANYINTEGER | DataType.INTEGER8 | DataType.INTEGER16 | DataType.INTEGER32 | DataType.INTEGER64:
-                validator_str = "int"
-            case DataType.ANYNUMBER | DataType.ANYFLOAT | DataType.FLOAT32 | DataType.FLOAT64:
-                validator_str = "float"
-            case DataType.STRING:
-                validator_str = "string"
-            case DataType.BYTEARRAY:
-                validator_str = "bytearray"
-
-        # TODO this can probably be made to look nicer, though it doesn't really matter
-        if "int" in validator_str:
-            validator_str = "int"
-            self.checkBox_Hex.setEnabled(True)
-            # keep hex validator if hex is checked
-            if self.checkBox_Hex.isChecked():
-                validator_str = "int_hex"
-        else:
-            self.checkBox_Hex.setChecked(False)
-            self.checkBox_Hex.setEnabled(False)
-
-        self.comboBox_ScanType_init()
-        self.lineEdit_Scan.setValidator(guiutils.validator_map[validator_str])
-        self.lineEdit_Scan2.setValidator(guiutils.validator_map[validator_str])
-        memscan.set_data_type(memscan_type)
-        # according to memscan instructions you should always do `reset` after changing type
-        memscan.reset()
-
     def pushButton_AttachProcess_clicked(self) -> None:
         self.processwindow = SelectProcessWindow(self)
         self.processwindow.show()
@@ -1565,8 +1796,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         attach_result = debugcore.attach(pid, gdb_path)
         if attach_result == typedefs.ATTACH_RESULT.SUCCESSFUL:
             settings.apply_after_init()
-            memscan.detach()
-            memscan.attach(pid)
+            for tab in self.scan_tabs:
+                tab.memscan.detach()
+                tab.memscan.attach(pid)
             self.on_new_process()
             SessionManager.on_process_changed()
             states.process_signals.attach.emit()
@@ -1595,8 +1827,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.cleanup_speedhack()
         if debugcore.create_process(file_path, args, ld_preload_path):
             settings.apply_after_init()
-            memscan.detach()
-            memscan.attach(debugcore.currentpid)
+            for tab in self.scan_tabs:
+                tab.memscan.detach()
+                tab.memscan.attach(debugcore.currentpid)
             self.on_new_process()
             SessionManager.on_process_changed()
             states.process_signals.attach.emit()
@@ -1614,12 +1847,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.is_wine_process = utils.is_wine_process(debugcore.currentpid)
         self.speedhack = speedhack.WineSpeedhack() if self.is_wine_process else speedhack.LinuxSpeedhack()
 
-        # enable scan GUI
-        self.lineEdit_Scan.setPlaceholderText(tr.SCAN_FOR)
-        self.widget_Scanbox.setEnabled(True)
-        self.pushButton_NextScan.setEnabled(False)
-        self.pushButton_UndoScan.setEnabled(False)
-        self.pushButton_CancelScan.setEnabled(False)
+        # enable scan GUI on every scan tab
+        for tab in self.scan_tabs:
+            tab.on_new_process()
         self.pushButton_AddAddressManually.setEnabled(True)
         self.pushButton_MemoryView.setEnabled(True)
 
@@ -1636,26 +1866,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.mark_address_tree_changed()
 
     def copy_to_address_table(self) -> None:
-        selected_indexes = self.tableWidget_valuesearchtable.selectionModel().selectedRows()
-        for index in selected_indexes:
-            address_item = self.tableWidget_valuesearchtable.item(index.row(), SEARCH_TABLE_ADDRESS_COL)
-            vt = copy.copy(address_item.data(Qt.ItemDataRole.UserRole))
-            self.add_entry_to_addresstable(tr.NO_DESCRIPTION, address_item.text(), vt)
-        self.update_address_table()
-        self.mark_address_tree_changed()
-
-    def reset_scan(self, inferior_exit: bool = False) -> None:
-        if inferior_exit:
-            memscan.detach()
-        else:
-            memscan.reset()
-        self.scan_mode = typedefs.SCAN_MODE.NEW
-        self.undo_scan_available = False
-        self.pushButton_NewFirstScan.setText(tr.FIRST_SCAN)
-        self.tableWidget_valuesearchtable.setRowCount(0)
-        self.update_scan_box_state()
-        self.progressBar.setValue(0)
-        self.label_MatchCount.setText(tr.MATCH_COUNT.format(0))
+        self.current_scan_tab.copy_to_address_table()
 
     def on_inferior_exit(self) -> None:
         monocore.reset()
@@ -1667,9 +1878,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.reset_speedhack_widgets()
         self.pushButton_MemoryView.setEnabled(False)
         self.pushButton_AddAddressManually.setEnabled(False)
-        self.widget_Scanbox.setEnabled(False)
-        self.lineEdit_Scan.setText("")
-        self.reset_scan(inferior_exit=True)
+        for tab in self.scan_tabs:
+            tab.on_inferior_exit()
         self.on_status_running()
         self.flashAttachButton = True
         self.flashAttachButtonTimer.start(100)
@@ -1821,10 +2031,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     # ----------------------------------------------------
     # QTimer loops
 
-    def update_progress_bar(self) -> None:
-        value = int(round(memscan.get_scan_progress() * 100))
-        self.progressBar.setValue(value)
-
     # Loop restarts itself to wait for function execution, same for the functions below
     def address_table_loop(self) -> None:
         if states.update_table and not states.exiting:
@@ -1837,7 +2043,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def search_table_loop(self) -> None:
         if not states.exiting:
             try:
-                self.update_search_table()
+                for tab in self.scan_tabs:
+                    tab.update_search_table()
             except:
                 traceback.print_exc()
         self.search_table_timer.start(500)
@@ -1851,28 +2058,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.freeze_timer.start(states.freeze_interval)
 
     # ----------------------------------------------------
-
-    def update_search_table(self) -> None:
-        if debugcore.currentpid == -1:
-            return
-        row_count = self.tableWidget_valuesearchtable.rowCount()
-        if row_count > 0:
-            self.tableWidget_valuesearchtable.setSortingEnabled(False)
-            try:
-                with debugcore.memory_handle() as mem_handle:
-                    for row_index in range(row_count):
-                        address_item = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_ADDRESS_COL)
-                        value_item = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_VALUE_COL)
-                        previous_text = self.tableWidget_valuesearchtable.item(row_index, SEARCH_TABLE_PREVIOUS_COL).text()
-                        address = address_item.text()
-                        value_type = address_item.data(Qt.ItemDataRole.UserRole)
-                        new_value = debugcore.read_memory(address, value_type, mem_handle=mem_handle)
-                        new_value = "" if new_value is None else str(new_value)
-                        if new_value != previous_text:
-                            value_item.setForeground(QBrush(QColor(255, 0, 0)))
-                        value_item.setText(new_value)
-            finally:
-                self.tableWidget_valuesearchtable.setSortingEnabled(True)
 
     def freeze(self) -> None:
         if debugcore.currentpid == -1:
@@ -2173,3 +2358,80 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.flashAttachButton_gradientState += 1
         if self.flashAttachButton_gradientState > 768:  # 32*24
             self.flashAttachButton_gradientState = 0
+
+    def setup_scan_tabs(self) -> None:
+        self.scan_tabs: list[ScanTabWidget] = []
+        self.add_scan_tab()
+        plus_button = QPushButton("+")
+        plus_button.setFixedSize(24, 24)
+        plus_button.setToolTip(tr.ADD_SCAN_TAB)
+        plus_button.clicked.connect(self.add_scan_tab)
+        self.tab_add_button = plus_button
+        self.tabWidget_Scans.setCornerWidget(plus_button, Qt.Corner.TopRightCorner)
+        self.tabWidget_Scans.tabCloseRequested.connect(self.close_scan_tab)
+        self.tabWidget_Scans.tabBarDoubleClicked.connect(self.rename_scan_tab)
+        self.setup_tab_shortcuts()
+
+    def setup_tab_shortcuts(self) -> None:
+        shortcut_new_tab = QShortcut(QKeySequence("Ctrl+T"), self)
+        shortcut_new_tab.activated.connect(self.add_scan_tab)
+        guiutils.append_shortcut_to_tooltip(self.tab_add_button, shortcut_new_tab)
+
+        shortcut_close_tab = QShortcut(QKeySequence("Ctrl+W"), self)
+        shortcut_close_tab.activated.connect(self.close_current_scan_tab)
+
+        shortcut_next_tab = QShortcut(QKeySequence("Ctrl+Tab"), self)
+        shortcut_next_tab.activated.connect(lambda: self.switch_scan_tab(1))
+
+        shortcut_prev_tab = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
+        shortcut_prev_tab.activated.connect(lambda: self.switch_scan_tab(-1))
+
+        for i in range(1, 10):
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{i}"), self)
+            shortcut.activated.connect(lambda i=i: self.jump_to_scan_tab(i))
+
+    def close_current_scan_tab(self) -> None:
+        self.close_scan_tab(self.tabWidget_Scans.currentIndex())
+
+    def switch_scan_tab(self, delta: int) -> None:
+        count = self.tabWidget_Scans.count()
+        if count <= 1:
+            return
+        current = self.tabWidget_Scans.currentIndex()
+        self.tabWidget_Scans.setCurrentIndex((current + delta) % count)
+
+    def jump_to_scan_tab(self, index: int) -> None:
+        count = self.tabWidget_Scans.count()
+        if index == 9:  # browser-like: Ctrl+9 jumps to the last tab
+            self.tabWidget_Scans.setCurrentIndex(count - 1)
+        elif 1 <= index <= count:
+            self.tabWidget_Scans.setCurrentIndex(index - 1)
+
+    def add_scan_tab(self) -> ScanTabWidget:
+        tab = ScanTabWidget(self)
+        self.scan_tabs.append(tab)
+        self.tabWidget_Scans.addTab(tab, tr.SCAN_TAB_TITLE.format(self.tabWidget_Scans.count() + 1))
+        self.tabWidget_Scans.setCurrentWidget(tab)
+        return tab
+
+    def close_scan_tab(self, index: int) -> None:
+        if self.tabWidget_Scans.count() <= 1:
+            return
+        tab = self.tabWidget_Scans.widget(index)
+        if tab.is_scanning:
+            return
+        tab.memscan.close()
+        self.scan_tabs.remove(tab)
+        self.tabWidget_Scans.removeTab(index)
+        tab.deleteLater()
+
+    def rename_scan_tab(self, index: int) -> None:
+        title, ok = QInputDialog.getText(
+            self, tr.RENAME_TAB_TITLE, tr.ENTER_TAB_NAME, text=self.tabWidget_Scans.tabText(index)
+        )
+        if ok and title.strip():
+            self.tabWidget_Scans.setTabText(index, title.strip())
+
+    @property
+    def current_scan_tab(self) -> ScanTabWidget:
+        return self.tabWidget_Scans.currentWidget()
