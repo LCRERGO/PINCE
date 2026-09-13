@@ -8,15 +8,15 @@ from tr.tr import get_locale
 from libpince import debugcore, utils, typedefs
 import json, os
 
-current_settings_version = "37"  # Increase version by one if you change settings
+current_settings_version = "38"  # Increase version by one if you change settings
 CHECK_UPDATES_ON_STARTUP = "General/check_updates_on_startup"
 SAVE_SESSION_ON_EXIT = "General/save_session_on_exit"
 
-# Due to community feedback, these signals are disabled by default: SIGUSR1, SIGUSR2, SIGPWR, SIGXCPU, SIGXFSZ, SIGSYS
+# Due to community feedback, these signals are disabled by default: SIGQUIT, SIGUSR1, SIGUSR2, SIGPWR, SIGXCPU, SIGXFSZ, SIGSYS
 default_signals = [
     ["SIGHUP", True, True],
     ["SIGINT", True, False],
-    ["SIGQUIT", True, True],
+    ["SIGQUIT", False, True],
     ["SIGILL", True, True],
     ["SIGTRAP", True, False],
     ["SIGABRT", True, True],
@@ -82,15 +82,41 @@ def init_settings() -> None:
         utils.logger.exception("An exception occurred while reading settings version")
         settings_version = None
     if settings_version != current_settings_version:
-        utils.logger.warning("Settings version mismatch, rolling back to the default configuration")
-        settings.clear()
-        set_default_settings()
+        if not migrate_settings(settings):
+            utils.logger.warning("Settings version mismatch, rolling back to the default configuration")
+            settings.clear()
+            set_default_settings()
     try:
         apply_settings()
     except Exception:
         utils.logger.exception("An exception occurred while loading settings, rolling back to the default configuration")
         settings.clear()
         set_default_settings()
+
+
+def migrate_settings(settings: QSettings) -> bool:
+    """Applies incremental migrations to existing settings without wiping the rest of the configuration.
+
+    Returns True if the settings were migrated to the current version, False if a full reset is required.
+    """
+    try:
+        version = int(settings.value("Misc/version", type=str))
+    except (TypeError, ValueError):
+        return False
+    if version < 38:
+        # SIGQUIT is sent by Steam/Proton while shutting a game down. Stopping on it froze the game
+        # (and left it holding the X pointer grab), so it's now passed through without stopping
+        try:
+            handle_signals = json.loads(settings.value("Debug/handle_signals", type=str))
+            for signal_data in handle_signals:
+                if signal_data and signal_data[0] == "SIGQUIT":
+                    signal_data[1] = False
+                    signal_data[2] = True
+            settings.setValue("Debug/handle_signals", json.dumps(handle_signals))
+        except (TypeError, ValueError):
+            return False
+    settings.setValue("Misc/version", current_settings_version)
+    return True
 
 
 # Please refrain from using python specific objects in settings, use json-compatible ones instead
