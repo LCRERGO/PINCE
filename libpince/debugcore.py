@@ -16,7 +16,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-from threading import Lock, Thread, Condition
+from threading import Event, Lock, Thread, Condition
 from time import sleep, time
 from collections import OrderedDict, defaultdict
 import pexpect, os, ctypes, pickle, shelve, re, struct, io, traceback
@@ -82,6 +82,10 @@ status_changed_condition = Condition()
 # This condition is notified if the current inferior gets terminated
 # See AwaitProcessExit class for an example
 process_exited_condition = Condition()
+
+# Level-triggered companion to process_exited_condition. It's set while an inferior exit is pending so
+# that a notification can never be lost if it arrives before the consumer starts waiting on the condition
+process_exited_event = Event()
 
 # This condition is notified if gdb starts to wait for the prompt output
 # See function send_command for an example
@@ -310,8 +314,13 @@ def state_observe_thread() -> None:
     Should be called by creating a thread. Usually called in initialization process by attach function
     """
 
+    global child
+    global gdb_output
+
+    local_child = child
+
     def check_inferior_status() -> None:
-        matches = regexes.gdb_state_observe.findall(child.before)
+        matches = regexes.gdb_state_observe.findall(local_child.before)
         if len(matches) > 0:
             global stop_reason
             global inferior_status
@@ -320,10 +329,12 @@ def state_observe_thread() -> None:
             for match in matches:
                 if match[0].startswith('stopped,reason="exited'):
                     with process_exited_condition:
-                        terminated_pid = currentpid
-                        detach()
-                        logger.info(f"Process terminated (PID: {terminated_pid})")
-                        process_exited_condition.notify_all()
+                        if local_child is child:
+                            terminated_pid = currentpid
+                            detach()
+                            logger.info(f"Process terminated (PID: {terminated_pid})")
+                            process_exited_event.set()
+                            process_exited_condition.notify_all()
                         return
 
             # For multiline outputs, only the last async event is important
@@ -365,39 +376,37 @@ def state_observe_thread() -> None:
                 with status_changed_condition:
                     status_changed_condition.notify_all()
 
-    global child
-    global gdb_output
     try:
         while True:
-            child.expect_exact("\r\n")  # A new line for TTY devices
-            child.before = child.before.strip()
-            if not child.before:
+            local_child.expect_exact("\r\n")  # A new line for TTY devices
+            local_child.before = local_child.before.strip()
+            if not local_child.before:
                 continue
             check_inferior_status()
             command_file = re.escape(utils.get_gdb_command_file(currentpid))
-            if regexes.gdb_command_source(command_file).search(child.before):
-                child.expect_exact("(gdb)")
-                child.before = child.before.strip()
+            if regexes.gdb_command_source(command_file).search(local_child.before):
+                local_child.expect_exact("(gdb)")
+                local_child.before = local_child.before.strip()
                 check_inferior_status()
-                gdb_output = child.before
+                gdb_output = local_child.before
                 with gdb_waiting_for_prompt_condition:
                     gdb_waiting_for_prompt_condition.notify_all()
                 if gdb_output_mode.command_output:
-                    logger.debug(child.before)
+                    logger.debug(local_child.before)
             else:
                 if gdb_output_mode.async_output:
-                    logger.debug(child.before)
-                gdb_async_output.broadcast_message(child.before)
+                    logger.debug(local_child.before)
+                gdb_async_output.broadcast_message(local_child.before)
     except (OSError, ValueError, pexpect.EOF) as e:
-        global gdb_initialized
-        gdb_initialized = False
-        with gdb_waiting_for_prompt_condition:
-            gdb_waiting_for_prompt_condition.notify_all()
-        with process_exited_condition:
-            if currentpid != -1:
+        if local_child is child and currentpid != -1:
+            detach()
+            with gdb_waiting_for_prompt_condition:
+                gdb_waiting_for_prompt_condition.notify_all()
+            with process_exited_condition:
+                process_exited_event.set()
                 process_exited_condition.notify_all()
         if isinstance(e, pexpect.EOF):
-            logger.exception(f"EOF exception caught within pexpect, here's the contents of child.before:\n{child.before}")
+            logger.exception(f"EOF exception caught within pexpect, here's the contents of child.before:\n{local_child.before}")
         logger.info("Exiting state_observe_thread")
 
 
@@ -795,17 +804,18 @@ def detach() -> None:
     global currentpid
     global current_process_identity
     global _wow64_inject_buffer
+    global child
+    global inferior_status
     old_pid = currentpid
     current_process_identity = None
     _libc_symbol_cache.clear()
     _wow64_inject_buffer = (0, 0)
     if gdb_initialized:
-        global child
-        global inferior_status
-        currentpid = -1
-        inferior_status = -1
-        gdb_initialized = False
         child.close()
+    # Reset the session state unconditionally so a dead pipe can never leave a stale currentpid behind
+    currentpid = -1
+    inferior_status = -1
+    gdb_initialized = False
     if old_pid != -1:
         utils.delete_ipc_path(old_pid)
         logger.info(f"Detached from the process with PID: {str(old_pid)}")

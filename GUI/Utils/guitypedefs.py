@@ -119,9 +119,13 @@ class AwaitProcessExit(QThread):
             with debugcore.process_exited_condition:
                 if self._shutdown.is_set():
                     break
-                debugcore.process_exited_condition.wait()
+                if not debugcore.process_exited_event.is_set():
+                    debugcore.process_exited_condition.wait()
                 if self._shutdown.is_set():
                     break
+                if not debugcore.process_exited_event.is_set():
+                    continue
+                debugcore.process_exited_event.clear()
             self.process_exited.emit()
 
 
