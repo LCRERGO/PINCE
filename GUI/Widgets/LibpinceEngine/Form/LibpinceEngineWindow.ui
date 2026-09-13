@@ -62,11 +62,6 @@
          </item>
         </layout>
        </widget>
-       <widget class="QWidget" name="plusTab">
-        <attribute name="title">
-         <string>+</string>
-        </attribute>
-       </widget>
       </widget>
       <widget class="QPlainTextEdit" name="outputEdit">
        <property name="font">

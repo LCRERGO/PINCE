@@ -39,9 +39,6 @@ class Ui_MainWindow(object):
         self.scriptEditor.setObjectName("scriptEditor")
         self.editorLayout.addWidget(self.scriptEditor)
         self.tabWidget.addTab(self.editorTab, "")
-        self.plusTab = QtWidgets.QWidget()
-        self.plusTab.setObjectName("plusTab")
-        self.tabWidget.addTab(self.plusTab, "")
         self.outputEdit = QtWidgets.QPlainTextEdit(parent=self.splitter)
         font = QtGui.QFont()
         font.setFamily("Monospace")
@@ -204,7 +201,6 @@ class Ui_MainWindow(object):
         _translate = QtCore.QCoreApplication.translate
         MainWindow.setWindowTitle(_translate("MainWindow", "Libpince Engine"))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.editorTab), _translate("MainWindow", "(untitled)"))
-        self.tabWidget.setTabText(self.tabWidget.indexOf(self.plusTab), _translate("MainWindow", "+"))
         self.outputEdit.setPlaceholderText(_translate("MainWindow", "Script output"))
         self.menuFile.setTitle(_translate("MainWindow", "File"))
         self.menuTemplates.setTitle(_translate("MainWindow", "Templates"))

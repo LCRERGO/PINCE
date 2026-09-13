@@ -6,6 +6,7 @@ from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMainWindow, QMessageBox, QVBoxLayout, QWidget
 
 from GUI.Utils import guiutils
+from GUI.Utils.plustab import PlusTabManager
 from GUI.Widgets.LibpinceEngine.Form.LibpinceEngineWindow import Ui_MainWindow
 from GUI.Widgets.LibpinceEngine.ScriptEditor import ScriptEditor
 from libpince import debugcore, typedefs, utils
@@ -286,10 +287,9 @@ class LibpinceEngineWindow(QMainWindow, Ui_MainWindow):
         super().__init__(parent)
         self.setupUi(self)
         self.configure_editor(self.scriptEditor)
-        index = self.tabWidget.indexOf(self.plusTab)
-        tab_bar = self.tabWidget.tabBar()
-        tab_bar.setTabButton(index, tab_bar.ButtonPosition.LeftSide, None)
-        tab_bar.setTabButton(index, tab_bar.ButtonPosition.RightSide, None)
+        self.plus_tab_manager = PlusTabManager(self.tabWidget)
+        self.plus_tab_manager.add_requested.connect(self.create_new_tab)
+        self.plus_tab_manager.close_requested.connect(self.close_tab)
 
         for action in (
             self.actionCode_injection,
@@ -298,8 +298,6 @@ class LibpinceEngineWindow(QMainWindow, Ui_MainWindow):
             self.actionRead_write_address,
         ):
             action.triggered.connect(lambda checked=False, a=action: self.insert_template(a.property("data")))
-        self.tabWidget.tabBarClicked.connect(self.handle_tab_click)
-        self.tabWidget.tabCloseRequested.connect(self.close_tab)
         self.actionOpen.triggered.connect(self.open_file)
         self.actionSave.triggered.connect(self.save_file)
         self.actionLibpince.triggered.connect(self.actionLibpince_triggered)
@@ -326,8 +324,7 @@ class LibpinceEngineWindow(QMainWindow, Ui_MainWindow):
         text_editor.setTabStopDistance(self.scriptEditor.tabStopDistance())
         self.configure_editor(text_editor)
         layout.addWidget(text_editor)
-        index = self.tabWidget.indexOf(self.plusTab)
-        self.tabWidget.insertTab(index, new_tab, tr.UNTITLED)
+        index = self.plus_tab_manager.insert_before_plus(new_tab, tr.UNTITLED)
         self.tabWidget.setCurrentIndex(index)
         return text_editor
 
@@ -335,12 +332,8 @@ class LibpinceEngineWindow(QMainWindow, Ui_MainWindow):
         current_tab = self.tabWidget.currentWidget()
         return current_tab.findChild(ScriptEditor) if current_tab else None
 
-    def handle_tab_click(self, index: int) -> None:
-        if index == self.tabWidget.count() - 1:
-            self.create_new_tab()
-
     def close_tab(self, index: int) -> None:
-        if index == self.tabWidget.count() - 1:
+        if self.plus_tab_manager.is_plus(index):
             return
         editor = self.tabWidget.widget(index).findChild(ScriptEditor)
         if editor and editor.is_modified:
