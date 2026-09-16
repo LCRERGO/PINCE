@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QMainWindow, QWidget, QTableWidgetItem, QMenu, QMessageBox, QFileDialog, QAbstractItemView, QAbstractSlider, QApplication
-from PyQt6.QtGui import QShortcut, QKeySequence, QKeyEvent, QWheelEvent, QContextMenuEvent, QColor, QColorConstants
+from PyQt6.QtGui import QShortcut, QKeySequence, QKeyEvent, QWheelEvent, QContextMenuEvent, QColor, QColorConstants, QAction
 from PyQt6.QtCore import Qt, QEvent, QObject, QTimer, QKeyCombination, QSignalBlocker, QItemSelection, QItemSelectionModel
 from GUI.AbstractTableModels.AsciiModel import AsciiModel
 from GUI.AbstractTableModels.HexModel import HexModel
@@ -160,6 +160,9 @@ class MemoryViewWindow(QMainWindow, Ui_MainWindow_MemoryView):
         self.actionDissect_Mono.triggered.connect(self.actionDissect_Mono_triggered)
         self.actionStructures.triggered.connect(self.actionStructures_triggered)
         self.actionLibpince_Engine.triggered.connect(self.actionLibpince_Engine_triggered)
+        self.actionTypes = QAction(tr.TYPES, self)
+        self.menuTools.insertAction(self.actionLibpince_Engine, self.actionTypes)
+        self.actionTypes.triggered.connect(self.actionTypes_triggered)
 
     def initialize_help_context_menu(self) -> None:
         self.actionLibpince.triggered.connect(self.actionLibpince_triggered)
@@ -1852,6 +1855,9 @@ class MemoryViewWindow(QMainWindow, Ui_MainWindow_MemoryView):
 
     def actionStructures_triggered(self) -> None:
         self.parent().show_structures_window()
+
+    def actionTypes_triggered(self) -> None:
+        self.parent().show_types_window()
 
     def actionLibpince_triggered(self) -> None:
         utils.execute_command_as_user('python3 -m webbrowser "https://korcankaraokcu.github.io/PINCE/"')

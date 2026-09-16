@@ -328,6 +328,10 @@ class ValueType:
         if not data or type(data[0]) is not int:
             raise TypeError("Serialized value types must start with an integer ID")
         serialized_id = data[0]
+        if serialized_id == CustomValueType._SERIALIZED_ID:
+            if len(data) != 2 or not isinstance(data[1], str):
+                raise TypeError("Serialized custom types must contain an ID and a name")
+            return CustomValueType(data[1])
         value_type_class, constructor_args = _SERIALIZED_TYPE_IDS[serialized_id]
         if value_type_class is BitFieldValueType:
             if len(data) != 4:
@@ -764,6 +768,185 @@ class Structure:
     def deserialize(cls, data: tuple) -> "Structure":
         name, members = data
         return cls(name, [StructureMember.deserialize(m) for m in members])
+
+
+def value_type_to_scan_index(value_type: "ValueType") -> int:
+    """Maps a concrete value type to the scan type the memory scanner understands."""
+    if isinstance(value_type, IntegerValueType):
+        return {8: SCAN_INDEX.INT8, 16: SCAN_INDEX.INT16, 32: SCAN_INDEX.INT32, 64: SCAN_INDEX.INT64}[value_type.bits]
+    if isinstance(value_type, FloatValueType):
+        return SCAN_INDEX.FLOAT32 if value_type.bits == 32 else SCAN_INDEX.FLOAT64
+    if isinstance(value_type, StringValueType):
+        return SCAN_INDEX.STRING
+    if isinstance(value_type, ByteArrayValueType):
+        return SCAN_INDEX.AOB
+    if isinstance(value_type, BitFieldValueType):
+        return SCAN_INDEX.INT_ANY
+    return SCAN_INDEX.INT32
+
+
+class AliasType:
+    """A named, configured built-in scalar value type."""
+
+    kind = "alias"
+
+    def __init__(self, name: str, value_type: "ValueType") -> None:
+        self.name = name
+        self.value_type = value_type
+
+    @property
+    def read_size(self) -> int | None:
+        return self.value_type.read_size
+
+    def parse(self, text: str) -> Any | None:
+        return self.value_type.parse(text)
+
+    def decode(self, data: bytes) -> Any:
+        return self.value_type.decode(data)
+
+    def encode(self, value: Any) -> bytes | None:
+        return self.value_type.encode(value)
+
+    @property
+    def scan_index(self) -> int:
+        return value_type_to_scan_index(self.value_type)
+
+    def serialize(self) -> list:
+        return [self.kind, self.name, self.value_type.serialize()]
+
+
+class EnumType:
+    """A named integer type with labeled values."""
+
+    kind = "enum"
+
+    def __init__(self, name: str, integer_type: "IntegerValueType", entries: "list[tuple[str, int]] | None" = None) -> None:
+        self.name = name
+        self.integer_type = integer_type
+        self.entries = list(entries) if entries else []
+
+    def label_for(self, value: int) -> str | None:
+        for label, entry_value in self.entries:
+            if entry_value == value:
+                return label
+        return None
+
+    @property
+    def read_size(self) -> int | None:
+        return self.integer_type.read_size
+
+    def decode(self, data: bytes) -> str:
+        value = self.integer_type.decode(data)
+        label = self.label_for(value)
+        return f"{label} ({value})" if label is not None else str(value)
+
+    def _normalized_parse(self, text: str) -> int | None:
+        value = self.integer_type.parse(text)
+        if value is not None and self.integer_type.value_repr == VALUE_REPR.SIGNED and value >= 1 << (self.integer_type.bits - 1):
+            value -= 1 << self.integer_type.bits
+        return value
+
+    def parse(self, text: str) -> int | None:
+        text = str(text).strip()
+        if not text:
+            return None
+        for label, value in self.entries:
+            if label == text:
+                return value
+        if text.endswith(")"):
+            label, separator, number = text.rpartition("(")
+            if separator:
+                parsed = self._normalized_parse(number[:-1].strip())
+                if parsed is not None and self.label_for(parsed) == label.strip():
+                    return parsed
+        return self._normalized_parse(text)
+
+    def encode(self, value: Any) -> bytes | None:
+        if isinstance(value, str):
+            value = self.parse(value)
+            if value is None:
+                return None
+        return self.integer_type.encode(value)
+
+    @property
+    def scan_index(self) -> int:
+        return value_type_to_scan_index(self.integer_type)
+
+    def serialize(self) -> list:
+        return [self.kind, self.name, self.integer_type.serialize(), [[label, value] for label, value in self.entries]]
+
+
+def deserialize_custom_type(data: list | tuple) -> "AliasType | EnumType":
+    kind, name = data[0], data[1]
+    if kind == AliasType.kind:
+        return AliasType(name, ValueType.deserialize(data[2]))
+    if kind == EnumType.kind:
+        return EnumType(name, ValueType.deserialize(data[2]), [(label, value) for label, value in data[3]])
+    raise ValueError(f"Unknown custom type kind: {kind}")
+
+
+_custom_types: dict[str, "AliasType | EnumType"] = {}
+
+
+def register_custom_type(definition: "AliasType | EnumType") -> None:
+    _custom_types[definition.name] = definition
+
+
+def unregister_custom_type(name: str) -> None:
+    _custom_types.pop(name, None)
+
+
+def clear_custom_types() -> None:
+    _custom_types.clear()
+
+
+def get_custom_type(name: str) -> "AliasType | EnumType | None":
+    return _custom_types.get(name)
+
+
+def list_custom_types() -> list[str]:
+    return sorted(_custom_types.keys())
+
+
+class CustomValueType(ValueType):
+    """A ValueType that delegates to a user-defined alias or enum registered by name."""
+
+    _SERIALIZED_ID = 13  # must never be renumbered, see _SERIALIZED_TYPE_IDS
+
+    def __init__(self, name: str = "") -> None:
+        self.name = name
+
+    @property
+    def definition(self) -> "AliasType | EnumType | None":
+        return _custom_types.get(self.name)
+
+    @property
+    def read_size(self) -> int | None:
+        definition = self.definition
+        return definition.read_size if definition is not None else None
+
+    def parse(self, text: str) -> Any | None:
+        definition = self.definition
+        return definition.parse(text) if definition is not None else None
+
+    def decode(self, data: bytes) -> Any:
+        definition = self.definition
+        return definition.decode(data) if definition is not None else ""
+
+    def encode(self, value: Any) -> bytes | None:
+        definition = self.definition
+        return definition.encode(value) if definition is not None else None
+
+    @property
+    def scan_index(self) -> int:
+        definition = self.definition
+        return definition.scan_index if definition is not None else SCAN_INDEX.INT32
+
+    def text(self) -> str:
+        return self.name
+
+    def serialize(self) -> tuple:
+        return (self._SERIALIZED_ID, self.name)
 
 
 class PointerChainResult:

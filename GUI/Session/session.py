@@ -20,12 +20,13 @@ class SessionDataChanged(IntFlag):
     NOTES = auto()
     PROCESS_NAME = auto()
     STRUCTURES = auto()
+    TYPES = auto()
 
 
 # The PCT-archive repo (https://github.com/PINCE-org/PCT-archive) validates submitted
 # .pct files against this format. If you change the session structure or bump the version,
 # update its validation too (.github/scripts/common.py in that repo)
-LATEST_VERSION = 3
+LATEST_VERSION = 4
 
 
 def _legacy_to_v1(content: list) -> dict[str, Any]:
@@ -48,6 +49,14 @@ def _v2_to_v3(content: dict[str, Any]) -> dict[str, Any]:
     return content
 
 
+def _v3_to_v4(content: dict[str, Any]) -> dict[str, Any]:
+    # v4 added user-defined alias/enum types
+    utils.logger.info("Migrating version 3 session data to version 4")
+    content["version"] = 4
+    content.setdefault("types", {})
+    return content
+
+
 def migrate_version(content: Any) -> dict[str, Any]:
     if type(content) is list:
         content = _legacy_to_v1(content)
@@ -55,10 +64,14 @@ def migrate_version(content: Any) -> dict[str, Any]:
         content = _v1_to_v2(content)
     if isinstance(content, dict) and type(content.get("version")) is int and content["version"] == 2:
         content = _v2_to_v3(content)
+    if isinstance(content, dict) and type(content.get("version")) is int and content["version"] == 3:
+        content = _v3_to_v4(content)
     return content
 
 
 def _valid_value_type(data: Any) -> bool:
+    if isinstance(data, list) and len(data) == 2 and data[0] == typedefs.CustomValueType._SERIALIZED_ID:
+        return isinstance(data[1], str)
     if not isinstance(data, list) or len(data) not in (4, 5):
         return False
     try:
@@ -79,7 +92,7 @@ def is_valid_session_data(content: dict[str, Any]) -> bool:
     # PCT-archive mirrors these checks to validate submitted .pct files, keep both in sync
     if not isinstance(content, dict):
         return False
-    keys = ["version", "notes", "bookmarks", "address_tree", "process_name"]
+    keys = ["version", "notes", "bookmarks", "address_tree", "process_name", "types"]
     for key in keys:
         if key not in content:
             return False
@@ -154,6 +167,24 @@ def is_valid_session_data(content: dict[str, Any]) -> bool:
                 return False
             if struct_ref is not None and not isinstance(struct_ref, str):
                 return False
+    types = content.get("types", {})
+    if not isinstance(types, dict):
+        return False
+    for key, data in types.items():
+        if not isinstance(key, str) or not isinstance(data, list) or len(data) < 1 or not isinstance(data[0], str):
+            return False
+        kind = data[0]
+        if kind == typedefs.AliasType.kind:
+            if len(data) != 3 or data[1] != key or not _valid_value_type(data[2]):
+                return False
+        elif kind == typedefs.EnumType.kind:
+            if len(data) != 4 or data[1] != key or not _valid_value_type(data[2]) or not isinstance(data[3], list):
+                return False
+            for entry in data[3]:
+                if not isinstance(entry, list) or len(entry) != 2 or not isinstance(entry[0], str) or type(entry[1]) is not int:
+                    return False
+        else:
+            return False
     return True
 
 
@@ -166,6 +197,7 @@ class Session:
         self.pct_address_tree: list = []
         self.pct_process_name: str = ""
         self.pct_structures: dict[str, tuple] = {}
+        self.pct_types: dict[str, list] = {}
         self.data_changed = SessionDataChanged.NONE
         self.file_path: str = os.path.expanduser("~")
         self.last_file_name: str = ""  # process name or file name
@@ -191,6 +223,7 @@ class Session:
             "address_tree": self.pct_address_tree,
             "process_name": self.pct_process_name,
             "structures": self.pct_structures,
+            "types": self.pct_types,
         }
         if not ask_for_path and self.file_backed:
             file_path = os.path.join(self.file_path, self.last_file_name)
@@ -275,6 +308,8 @@ class Session:
         self.pct_address_tree = content["address_tree"]
         self.pct_process_name = content["process_name"]
         self.pct_structures = content.get("structures", {})
+        self.pct_types = content.get("types", {})
+        TypeManager.sync_registry()
 
         self.file_path = os.path.dirname(file_path)
         self.last_file_name = os.path.basename(file_path)
@@ -393,6 +428,7 @@ class SessionManager:
             QMessageBox.information(None, tr.INFO, tr.SESSION_RESET_CANCELLED)
             return False
         SessionManager.session = Session()
+        TypeManager.sync_registry()
         states.session_signals.new_session.emit()
         SessionManager.session.data_changed = SessionDataChanged.NONE
         return True
@@ -500,3 +536,72 @@ class StructureManager:
     @staticmethod
     def _mark_changed() -> None:
         SessionManager.get_session().data_changed |= SessionDataChanged.STRUCTURES
+
+
+class TypeManager:
+    """Session-backed registry of user-defined alias/enum types.
+
+    The serialized definitions live in the session, while libpince keeps a live
+    registry (typedefs._custom_types) that CustomValueType resolves against.
+    """
+
+    @staticmethod
+    def _registry() -> dict[str, list]:
+        return SessionManager.get_session().pct_types
+
+    @staticmethod
+    def list_names() -> list[str]:
+        return sorted(TypeManager._registry().keys())
+
+    @staticmethod
+    def get(name: str) -> typedefs.AliasType | typedefs.EnumType | None:
+        data = TypeManager._registry().get(name)
+        return typedefs.deserialize_custom_type(data) if data is not None else None
+
+    @staticmethod
+    def _name_taken(name: str, exclude: str | None = None) -> bool:
+        lowered = name.lower()
+        return any(key.lower() == lowered and key != exclude for key in TypeManager._registry())
+
+    @staticmethod
+    def add(definition: typedefs.AliasType | typedefs.EnumType) -> bool:
+        if not definition.name or TypeManager._name_taken(definition.name):
+            return False
+        TypeManager._registry()[definition.name] = definition.serialize()
+        TypeManager.sync_registry()
+        TypeManager._mark_changed()
+        return True
+
+    @staticmethod
+    def update(definition: typedefs.AliasType | typedefs.EnumType) -> None:
+        TypeManager._registry()[definition.name] = definition.serialize()
+        TypeManager.sync_registry()
+        TypeManager._mark_changed()
+
+    @staticmethod
+    def rename(old: str, new: str) -> bool:
+        registry = TypeManager._registry()
+        if old not in registry or not new or TypeManager._name_taken(new, exclude=old):
+            return False
+        data = registry.pop(old)
+        data[1] = new
+        registry[new] = data
+        TypeManager.sync_registry()
+        TypeManager._mark_changed()
+        return True
+
+    @staticmethod
+    def delete(name: str) -> None:
+        if TypeManager._registry().pop(name, None) is not None:
+            TypeManager.sync_registry()
+            TypeManager._mark_changed()
+
+    @staticmethod
+    def sync_registry() -> None:
+        typedefs.clear_custom_types()
+        for data in TypeManager._registry().values():
+            typedefs.register_custom_type(typedefs.deserialize_custom_type(data))
+
+    @staticmethod
+    def _mark_changed() -> None:
+        SessionManager.get_session().data_changed |= SessionDataChanged.TYPES

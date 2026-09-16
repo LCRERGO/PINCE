@@ -24,7 +24,7 @@ class ManualAddressDialog(QDialog, Ui_Dialog):
         self.lineEdit_Address.setFixedWidth(180)
         vt = typedefs.IntegerValueType() if not value_type else value_type
         self.lineEdit_Length.setValidator(HexValidator(99, self))
-        guiutils.fill_value_combobox(self.comboBox_ValueType, vt, include_bit_field=True)
+        guiutils.fill_value_combobox(self.comboBox_ValueType, vt, include_bit_field=True, include_custom_types=True)
         guiutils.fill_endianness_combobox(self.comboBox_Endianness, getattr(vt, "endian", typedefs.ENDIANNESS.HOST))
         # Resolved here instead of in the signature because default arguments are evaluated on import, which is before tr.translate() runs.
         self.lineEdit_Description.setText(tr.NO_DESCRIPTION if description is None else description)

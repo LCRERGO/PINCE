@@ -139,10 +139,20 @@ def resize_to_contents(tablewidget: QTableWidget) -> None:
     tablewidget.horizontalHeader().resizeSection(tablewidget.columnCount() - 1, default_size)
 
 
-def fill_value_combobox(combobox: QComboBox, current_type: typedefs.ValueType | None = None, *, include_bit_field: bool = False) -> None:
+def _value_type_key(value_type: typedefs.ValueType) -> tuple:
+    return (type(value_type), getattr(value_type, "bits", None), getattr(value_type, "encoding", None), getattr(value_type, "name", None))
+
+
+def fill_value_combobox(
+    combobox: QComboBox,
+    current_type: typedefs.ValueType | None = None,
+    *,
+    include_bit_field: bool = False,
+    include_custom_types: bool = False,
+) -> None:
     """Fill a combobox with value-type prototypes."""
     target = current_type or typedefs.IntegerValueType()
-    target_key = (type(target), getattr(target, "bits", None), getattr(target, "encoding", None))
+    target_key = _value_type_key(target)
     choices = (
         [typedefs.IntegerValueType(bits) for bits in (8, 16, 32, 64)]
         + [typedefs.FloatValueType(bits) for bits in (32, 64)]
@@ -151,10 +161,12 @@ def fill_value_combobox(combobox: QComboBox, current_type: typedefs.ValueType | 
     )
     if include_bit_field:
         choices.append(copy.copy(target) if isinstance(target, typedefs.BitFieldValueType) else typedefs.BitFieldValueType())
+    if include_custom_types:
+        choices.extend(typedefs.CustomValueType(name) for name in typedefs.list_custom_types())
     combobox.setCurrentIndex(0)
     for value_type in choices:
         combobox.addItem(value_type.text().split("[", 1)[0], value_type)
-        if (type(value_type), getattr(value_type, "bits", None), getattr(value_type, "encoding", None)) == target_key:
+        if _value_type_key(value_type) == target_key:
             combobox.setCurrentIndex(combobox.count() - 1)
 
 

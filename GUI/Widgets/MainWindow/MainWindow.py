@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QShortcut, QKeySequence, QIcon, QPixmap, QBrush, QColor, QKeyEvent, QMouseEvent, QContextMenuEvent, QCloseEvent
 from PyQt6.QtCore import Qt, QTimer, QSettings, QKeyCombination, QItemSelectionModel, pyqtSignal
-from GUI.Session.session import SessionDataChanged, SessionManager, StructureManager
+from GUI.Session.session import SessionDataChanged, SessionManager, StructureManager, TypeManager
 from GUI.Settings import settings
 from GUI.States import states
 from GUI.Utils import guitypedefs, guiutils, update_check, utilwidgets
@@ -25,6 +25,7 @@ from GUI.Widgets.SessionNotes.SessionNotes import SessionNotesWidget
 from GUI.Widgets.Settings.Settings import SettingsDialog
 from GUI.Widgets.Structures.StructuresWindow import StructuresWindow
 from GUI.Widgets.Structures.StructureViewDialog import StructureViewDialog
+from GUI.Widgets.Types.TypesWindow import TypesWindow
 from GUI.Widgets.TrackSelector.TrackSelector import TrackSelectorDialog
 from GUI.Widgets.TrackWatchpoint.TrackWatchpoint import TrackWatchpointWidget
 from libpince import debugcore, monocore, scancore, speedhack, typedefs, utils
@@ -332,7 +333,7 @@ class ScanTabWidget(QWidget):
         value_2 = None
 
         # none of these should be possible to be true at the same time
-        scan_index = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
+        scan_index = self._resolved_scan_index(self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole))
         if scan_index >= typedefs.SCAN_INDEX.FLOAT_ANY and scan_index <= typedefs.SCAN_INDEX.ANY:
             # Manually fix an edge case in float_number validator
             if search_for[-1] in {"e", "E"}:
@@ -490,7 +491,7 @@ class ScanTabWidget(QWidget):
             typedefs.SCAN_TYPE.UNKNOWN: tr.UNKNOWN_VALUE,
         }
         current_type = self.comboBox_ScanType.currentData(Qt.ItemDataRole.UserRole)
-        value_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
+        value_type = self._resolved_scan_index(self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole))
         self.comboBox_ScanType.clear()
         items = typedefs.SCAN_TYPE.get_list(self.scan_mode, value_type)
         for type_index in items:
@@ -525,15 +526,31 @@ class ScanTabWidget(QWidget):
             self.memscan.set_reverse_endianness(sys.byteorder != "big")
 
     def comboBox_ValueType_init(self) -> None:
+        current_data = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
+        self.comboBox_ValueType.blockSignals(True)
         self.comboBox_ValueType.clear()
         for value_index, value_text in typedefs.scan_index_to_text_dict.items():
             self.comboBox_ValueType.addItem(value_text, value_index)
-        self.comboBox_ValueType.setCurrentIndex(self.comboBox_ValueType.findData(typedefs.SCAN_INDEX.INT32))
+        for name in typedefs.list_custom_types():
+            self.comboBox_ValueType.addItem(name, name)
+        self.comboBox_ValueType.blockSignals(False)
+        index = self.comboBox_ValueType.findData(current_data) if current_data is not None else -1
+        if index < 0:
+            index = self.comboBox_ValueType.findData(typedefs.SCAN_INDEX.INT32)
+        self.comboBox_ValueType.setCurrentIndex(index)
         self.comboBox_ValueType_current_index_changed()
+
+    def _resolved_scan_index(self, value_type_data: int | str | None) -> int:
+        if isinstance(value_type_data, str):
+            definition = typedefs.get_custom_type(value_type_data)
+            return definition.scan_index if definition is not None else typedefs.SCAN_INDEX.INT32
+        if value_type_data is None:
+            return typedefs.SCAN_INDEX.INT32
+        return value_type_data
 
     def comboBox_ValueType_current_index_changed(self) -> None:
         current_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
-        memscan_type = scancore.scan_index_to_memscan_dict[current_type]
+        memscan_type = scancore.scan_index_to_memscan_dict[self._resolved_scan_index(current_type)]
         match memscan_type:
             case DataType.ANYINTEGER | DataType.INTEGER8 | DataType.INTEGER16 | DataType.INTEGER32 | DataType.INTEGER64:
                 validator_str = "int"
@@ -581,7 +598,8 @@ class ScanTabWidget(QWidget):
             self.lineEdit_Scan.setValidator(guiutils.validator_map.get("int"))
             self.lineEdit_Scan2.setValidator(guiutils.validator_map.get("int"))
             base, converter = 16, str
-        if self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole) <= typedefs.SCAN_INDEX.INT64:
+        current_data = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
+        if isinstance(current_data, int) and current_data <= typedefs.SCAN_INDEX.INT64:
             for line_edit in (self.lineEdit_Scan, self.lineEdit_Scan2):
                 try:
                     line_edit.setText(converter(int(line_edit.text(), base)))
@@ -615,10 +633,14 @@ class ScanTabWidget(QWidget):
         header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
         header.blockSignals(False)
         current_type = self.comboBox_ValueType.currentData(Qt.ItemDataRole.UserRole)
+        resolved_type = self._resolved_scan_index(current_type)
         scan_text = self.lineEdit_Scan.text()
-        length = (
-            len(scan_text.split()) if current_type == typedefs.SCAN_INDEX.AOB else len(scan_text) if current_type == typedefs.SCAN_INDEX.STRING else 0
-        )
+        if resolved_type == typedefs.SCAN_INDEX.AOB:
+            length = len(scan_text.split())
+        elif resolved_type == typedefs.SCAN_INDEX.STRING:
+            length = len(scan_text)
+        else:
+            length = 0
         hex_values = self.checkBox_Hex.isChecked()
         endian = self.comboBox_Endianness.currentData(Qt.ItemDataRole.UserRole)
         with debugcore.memory_handle() as mem_handle:
@@ -636,7 +658,9 @@ class ScanTabWidget(QWidget):
                     value_repr = typedefs.VALUE_REPR.HEX
                 else:
                     value_repr = typedefs.VALUE_REPR.SIGNED if match_info.is_signed_integer_only() else typedefs.VALUE_REPR.UNSIGNED
-                if match.is_string_match():
+                if isinstance(current_type, str):
+                    value_type = typedefs.CustomValueType(current_type)
+                elif match.is_string_match():
                     value_type = typedefs.StringValueType("utf-8", length=length, endian=endian)
                 elif match.is_bytearray_match():
                     value_type = typedefs.ByteArrayValueType(length)
@@ -1031,6 +1055,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.pushButton_CheckForUpdates.hide()
         self.libpince_engine_window: LibpinceEngineWindow | None = None
         self.structures_window: StructuresWindow | None = None
+        self.types_window: TypesWindow | None = None
         self.pushButton_Settings.clicked.connect(self.pushButton_Settings_clicked)
         self.pushButton_Console.clicked.connect(self.pushButton_Console_clicked)
         self.pushButton_Wiki.clicked.connect(self.pushButton_Wiki_clicked)
@@ -1903,10 +1928,16 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.treeWidget_AddressTable.invisibleRootItem(),
             self.treeWidget_AddressTable.topLevelItemCount(),
         )
+        self.refresh_custom_type_ui()
+        if self.types_window:
+            self.types_window.refresh()
 
     def on_new_session(self) -> None:
         self.session = SessionManager.get_session()
         self.clear_address_table()
+        self.refresh_custom_type_ui()
+        if self.types_window:
+            self.types_window.refresh()
 
     # Returns: a bool value indicates whether the operation succeeded.
     def attach_to_pid(self, pid: int) -> bool:
@@ -2116,6 +2147,59 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def _add_structure_records_to_table(self, records: list) -> None:
         self.insert_records(records, self.treeWidget_AddressTable.invisibleRootItem(), 0)
         self.update_address_table()
+
+    def show_types_window(self) -> TypesWindow:
+        if not self.types_window:
+            self.types_window = TypesWindow(self)
+        self.types_window.refresh()
+        self.types_window.show()
+        self.types_window.activateWindow()
+        return self.types_window
+
+    def refresh_custom_type_ui(self) -> None:
+        for tab in self.scan_tabs:
+            tab.comboBox_ValueType_init()
+
+    def _iter_address_table_rows(self):
+        iterator = QTreeWidgetItemIterator(self.treeWidget_AddressTable)
+        while iterator.value() is not None:
+            yield iterator.value()
+            iterator += 1
+
+    def custom_type_references(self, name: str) -> list[str]:
+        references = []
+        for row in self._iter_address_table_rows():
+            value_type = row.data(TYPE_COL, Qt.ItemDataRole.UserRole)
+            if isinstance(value_type, typedefs.CustomValueType) and value_type.name == name:
+                references.append(row.text(DESC_COL) or row.text(ADDR_COL))
+        for tab in self.scan_tabs:
+            for row in range(tab.tableWidget_valuesearchtable.rowCount()):
+                item = tab.tableWidget_valuesearchtable.item(row, SEARCH_TABLE_ADDRESS_COL)
+                if item is None:
+                    continue
+                value_type = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(value_type, typedefs.CustomValueType) and value_type.name == name:
+                    references.append(item.text())
+        return references
+
+    def rename_custom_type(self, old: str, new: str) -> bool:
+        if not TypeManager.rename(old, new):
+            return False
+        for row in self._iter_address_table_rows():
+            value_type = row.data(TYPE_COL, Qt.ItemDataRole.UserRole)
+            if isinstance(value_type, typedefs.CustomValueType) and value_type.name == old:
+                value_type.name = new
+                row.setText(TYPE_COL, value_type.text())
+        for tab in self.scan_tabs:
+            for row in range(tab.tableWidget_valuesearchtable.rowCount()):
+                item = tab.tableWidget_valuesearchtable.item(row, SEARCH_TABLE_ADDRESS_COL)
+                if item is None:
+                    continue
+                value_type = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(value_type, typedefs.CustomValueType) and value_type.name == old:
+                    value_type.name = new
+        self.update_address_table()
+        return True
 
     def mark_address_tree_changed(self) -> None:
         self.session.data_changed |= SessionDataChanged.ADDRESS_TREE

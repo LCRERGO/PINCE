@@ -13,7 +13,7 @@ class EditTypeDialog(QDialog, Ui_Dialog):
         vt = typedefs.IntegerValueType() if not value_type else value_type
         self.lineEdit_Length.setValidator(HexValidator(99, self))
         self.lineEdit_Length.setFixedWidth(40)
-        guiutils.fill_value_combobox(self.comboBox_ValueType, vt, include_bit_field=True)
+        guiutils.fill_value_combobox(self.comboBox_ValueType, vt, include_bit_field=True, include_custom_types=True)
         guiutils.fill_endianness_combobox(self.comboBox_Endianness, getattr(vt, "endian", typedefs.ENDIANNESS.HOST))
         if isinstance(vt, (typedefs.StringValueType, typedefs.ByteArrayValueType)):
             self.lineEdit_Length.setText(str(vt.length))
