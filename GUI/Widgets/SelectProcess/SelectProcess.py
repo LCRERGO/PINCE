@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import QMainWindow, QWidget, QTableWidget, QTableWidgetItem, QMessageBox, QFileDialog
 from PyQt6.QtGui import QKeyEvent, QCursor
 from PyQt6.QtCore import Qt
-from GUI.Utils import guiutils, utilwidgets
+from GUI.Utils import guiutils, utilwidgets, procicons
 from GUI.Widgets.SelectProcess.Form.SelectProcess import Ui_MainWindow
 from libpince import utils
 from tr.tr import TranslationConstants as tr
@@ -18,6 +18,7 @@ class SelectProcessWindow(QMainWindow, Ui_MainWindow):
         self.pushButton_CreateProcess.clicked.connect(self.pushButton_CreateProcess_clicked)
         self.lineEdit_SearchProcess.textChanged.connect(self.generate_new_list)
         self.tableWidget_ProcessTable.itemDoubleClicked.connect(self.pushButton_Open_clicked)
+        self.tableWidget_ProcessTable.currentCellChanged.connect(self.apply_selected_icon)
         guiutils.center_to_parent(self)
 
     # refreshes process list
@@ -45,8 +46,20 @@ class SelectProcessWindow(QMainWindow, Ui_MainWindow):
             tablewidget.insertRow(current_row)
             tablewidget.setItem(current_row, 0, QTableWidgetItem(pid))
             tablewidget.setItem(current_row, 1, QTableWidgetItem(user))
-            tablewidget.setItem(current_row, 2, QTableWidgetItem(name))
+            name_item = QTableWidgetItem(name)
+            name_item.setIcon(procicons.get_process_icon(pid, name))
+            tablewidget.setItem(current_row, 2, name_item)
         tablewidget.setSortingEnabled(True)
+
+    # resolves heavier icon sources (PE resources) for the selected row only
+    def apply_selected_icon(self, current_row: int, _current_column: int = 0, _previous_row: int = -1, _previous_column: int = 0) -> None:
+        if current_row < 0:
+            return
+        pid_item = self.tableWidget_ProcessTable.item(current_row, 0)
+        name_item = self.tableWidget_ProcessTable.item(current_row, 2)
+        if pid_item is None or name_item is None:
+            return
+        name_item.setIcon(procicons.get_process_icon(int(pid_item.text()), name_item.text(), allow_pe=True))
 
     # gets the pid out of the selection to attach
     def pushButton_Open_clicked(self) -> None:
